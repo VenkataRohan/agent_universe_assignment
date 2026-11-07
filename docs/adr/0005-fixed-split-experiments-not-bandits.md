@@ -1,0 +1,3 @@
+# Experiments are fixed splits, not bandits
+
+Each experiment is one approved config change that fixes the traffic split until a deterministic test declares a winner or the experiment ends inconclusive, followed by one promotion proposal. Every reallocation is a governance action, approval requests are capped per day, and customer-facing dimensions are never auto-applied (ADR-0002), so a bandit's continuous re-weighting is not available. A fixed split also gives a false-winner rate we can state, which a regulated client's approver can follow. Welcome message and voice are sampled independently, so one split tests both dimensions factorially at no extra traffic cost.

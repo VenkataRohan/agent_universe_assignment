@@ -1,0 +1,3 @@
+# A workflow's cohorts are a disjoint partition
+
+Within a workflow, cohorts never overlap: each is a filter over lead features, and together with `default` they cover every lead exactly once. The simulator assigns a lead to the *first* matching cohort in config order. With overlapping cohorts, a lead's membership in config could differ from its membership in our analysis, and then detection, experiments and the supervisor view would disagree about who is in "60+". A partition makes order irrelevant. The cost: two overlapping ideas ("60+", "Tamil speakers") must be expressed as their intersections.
