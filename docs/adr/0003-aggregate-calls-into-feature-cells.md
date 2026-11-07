@@ -6,3 +6,4 @@ Each call event is folded into a counter keyed by workflow, day, hour, config ve
 
 - Per-person questions (e.g. a person's best hour) can't be answered after the fact. This is consistent with cutting per-person call time.
 - Learning never reads raw calls. But a slim per-call **exposure log** (lead, time, config version, cohort, variant, outcome) is written in the same chunk transaction, **for audit only**: Northwind's auditors need "which variant did this customer hear, and why was it live" (≈40 MB/day on load).
+- The key also carries the call's `cohort_id` (as the simulator assigned it, so experiments can be attributed by config version and cohort) and an **attempt band** (1, 2, 3 = third or later). The attempt band is there for attempt-adjusted per-hour rates (spec story 14). It roughly triples rows at dev volume, but at load volume the key is dense and the cost is bounded by cells × hours × variants × 3.

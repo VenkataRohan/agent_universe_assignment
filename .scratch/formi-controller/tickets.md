@@ -39,7 +39,7 @@ When a ticket is finished, set its `**Status:**` line to `done` and tick its row
 
 | # | Ticket | Blocked by | Done |
 |---|---|---|---|
-| 01 | Walking skeleton: loop, ingestion, restart | None | [ ] |
+| 01 | Walking skeleton: loop, ingestion, restart | None | [x] |
 | 02 | Statistics module | None | [ ] |
 | 03 | Cohorts and history baselines | 01 | [ ] |
 | 04 | Governance client on the approval path, first used by degraded caller IDs | 01, 02, 03 | [ ] |

@@ -1,0 +1,110 @@
+"""Loop: one process, one thread, one 15-minute tick at a time.
+
+Each tick: advance the simulated clock -> ingest every chunk after the cursor. Later tickets add
+reconcile/apply, detection, decisions and proposals to `step()`.
+"""
+from __future__ import annotations
+
+import logging
+from datetime import date, datetime, timedelta
+from pathlib import Path
+
+import httpx
+
+from .ingest import IngestError, Ingestor
+from .simclient import SimClient, SimError
+from .store import Store
+
+log = logging.getLogger("controller")
+CHUNK_ATTEMPTS = 3
+
+
+class ResumeRefused(Exception):
+    """The store belongs to a different world than the simulator we are talking to."""
+
+
+class Controller:
+    def __init__(self, http: httpx.Client, db_path: str | Path):
+        self.sim = SimClient(http)
+        self.store = Store(db_path)
+        self._ingestor: Ingestor | None = None
+        self._state: dict = {}
+
+    @property
+    def ingestor(self) -> Ingestor:
+        if self._ingestor is None:
+            raise RuntimeError("controller not started")
+        return self._ingestor
+
+    # -- lifecycle -----------------------------------------------------------------------------
+    def start(self) -> None:
+        """Check the store belongs to this world, then catch up on every chunk after the cursor."""
+        st = self.sim.state()
+        run = self.store.run_identity()
+        if run is None:
+            d0 = (datetime.fromisoformat(st["ts"]) - timedelta(minutes=st["sim_minute"])).date()
+            self.store.create_run(st["scenario"], d0.isoformat(), st["tick_minutes"], st["sim_minute"])
+        else:
+            _check_same_world(run, st)
+            d0 = date.fromisoformat(run["d0_date"])
+        campaign_days = {w["workflow_id"]: len(w["cadence"]) for w in self.sim.workflows()}
+        self._ingestor = Ingestor(self.store, d0, campaign_days)
+        _, through = self.store.cursor()
+        self._ingestor.warm(self._ingestor.day(_ts_at(d0, through)))
+        self._state = st
+        self._catch_up()
+
+    def step(self) -> bool:
+        """Advance one tick and ingest what it produced. Returns True once the scenario is finished."""
+        if self._ingestor is None:
+            self.start()
+        if self._state["finished"]:
+            return True
+        self._state = self.sim.advance_to(self._state["sim_minute"] + self._state["tick_minutes"])
+        self.store.record_sim_minute(self._state["sim_minute"])
+        self._catch_up()
+        return bool(self._state["finished"])
+
+    def run(self) -> None:
+        while not self.step():
+            pass
+        log.info("scenario finished at %s", self._state["ts"])
+
+    def close(self) -> None:
+        self.store.close()
+
+    # -- ingestion -----------------------------------------------------------------------------
+    def _catch_up(self) -> None:
+        """Ingest, in order, every chunk the simulator has published after the cursor."""
+        cursor, _ = self.store.cursor()
+        pending = self.sim.list_chunks("history", cursor) + self.sim.list_chunks("events", cursor)
+        for meta in sorted(pending, key=lambda c: c["chunk"]):
+            self._ingest_with_retry(meta)
+        # Everything the simulator had published is in; the store is current to its clock.
+        self.store.mark_ingested_through(self._state["sim_minute"])
+
+    def _ingest_with_retry(self, meta: dict) -> None:
+        for attempt in range(1, CHUNK_ATTEMPTS + 1):
+            try:
+                self.ingestor.ingest_chunk(meta, self.sim.chunk_lines(meta["chunk"]))
+                return
+            except (IngestError, SimError, httpx.TransportError) as e:
+                log.warning("ingest attempt %d/%d failed: %s", attempt, CHUNK_ATTEMPTS, e)
+                if attempt == CHUNK_ATTEMPTS:
+                    raise
+
+
+def _check_same_world(run, st: dict) -> None:
+    if run["scenario"] != st["scenario"]:
+        raise ResumeRefused(
+            f"store belongs to scenario {run['scenario']!r} but the simulator is running "
+            f"{st['scenario']!r}. Point --db at a fresh file (or the store for this scenario).")
+    if st["sim_minute"] < run["ingested_through_minute"]:
+        raise ResumeRefused(
+            f"the simulator's clock (minute {st['sim_minute']}) is behind the store's cursor "
+            f"(minute {run['ingested_through_minute']}): the simulator was restarted, so this is a "
+            f"new world. Point --db at a fresh file to start over.")
+
+
+def _ts_at(d0: date, minute: int) -> str:
+    return (datetime.combine(d0, datetime.min.time()) + timedelta(minutes=minute)).isoformat()

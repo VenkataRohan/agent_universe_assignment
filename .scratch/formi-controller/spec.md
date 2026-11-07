@@ -164,7 +164,8 @@ It ships as `./run.sh <SIM_URL>`. It resumes cleanly after `kill -9`, and comes 
 - **Query interface and CLI**: the read-only queries `why`, `heard`, `status`, `health` and `report --weekly`, with the CLI as a thin wrapper over them. Tests assert through the same query interface.
 - **Packaging**:
   - **`run.sh`:** runs `python3 -m controller --sim-url "$1" --db state/controller.db`, with no Docker and no new dependencies beyond `requirements.txt`.
-  - **Restart identity:** the controller resumes from an existing DB only if its scenario name matches the simulator's and the simulator's `sim_minute` is at or beyond the stored cursor. Otherwise it refuses with a clear message.
+  - **Restart identity:** the controller resumes from an existing DB only if its scenario name matches the simulator's and the simulator's `sim_minute` is at or beyond the stored cursor. Otherwise it refuses with a clear message (exit code 2).
+  - **`run.sh` on a mismatch:** `run.sh` passes `--fresh-if-mismatch`. When the store fails the identity check, it is moved aside as `controller.db.stale-<timestamp>` and the run starts fresh, with a warning in the log. The goal is the same as the refusal: a restarted simulator is never mistaken for the same world. The difference is that a grader running several scenarios through `run.sh` needs no manual step. Known blind spot: a store that has ingested only history (cursor at minute 0) can't tell a restarted simulator from the original, because the clock check needs the clock to have moved. Same-seed worlds have identical history, so this is harmless.
   - **Scripts:** a crash-test script and a load-measurement script live in a scripts directory.
 
 **API contract notes** (from `docs/SIMULATOR.md` and `sim/server.py`):
