@@ -1,0 +1,34 @@
+{
+  "mode": "run.sh",
+  "exit_code": 0,
+  "wall_s": 546.3,
+  "days": [
+    {
+      "day": 0,
+      "wall_s": 143.2
+    },
+    {
+      "day": 1,
+      "wall_s": 86.9
+    },
+    {
+      "day": 2,
+      "wall_s": 109.2
+    },
+    {
+      "day": 3,
+      "wall_s": 99.6
+    },
+    {
+      "day": 4,
+      "wall_s": 107.3
+    }
+  ],
+  "controller_peak_rss_mb": 226,
+  "simulator_peak_rss_mb": 709,
+  "scenario": "public_03_load.yaml",
+  "host": {
+    "cpus": 10,
+    "platform": "darwin"
+  }
+}

@@ -1,0 +1,67 @@
+{
+  "mode": "in-process",
+  "startup_s": 63.9,
+  "wall_s": 492.1,
+  "events_ingested_live": 4200164,
+  "ingest_s": 99.4,
+  "ingest_events_per_s": 42243,
+  "decision_lag_s": {
+    "p50": 0.809,
+    "p95": 1.64,
+    "max": 7.324
+  },
+  "days": [
+    {
+      "day": 0,
+      "wall_s": 82.8,
+      "controller_s": 75.8,
+      "sim_s": 7.1,
+      "ingest_s": 20.5,
+      "decide_s": 55.3,
+      "peak_rss_mb": 419.1
+    },
+    {
+      "day": 1,
+      "wall_s": 85.3,
+      "controller_s": 78.1,
+      "sim_s": 7.2,
+      "ingest_s": 16.4,
+      "decide_s": 61.7,
+      "peak_rss_mb": 449.5
+    },
+    {
+      "day": 2,
+      "wall_s": 112.2,
+      "controller_s": 105.0,
+      "sim_s": 7.2,
+      "ingest_s": 20.6,
+      "decide_s": 84.4,
+      "peak_rss_mb": 449.5
+    },
+    {
+      "day": 3,
+      "wall_s": 101.8,
+      "controller_s": 94.5,
+      "sim_s": 7.3,
+      "ingest_s": 21.0,
+      "decide_s": 73.4,
+      "peak_rss_mb": 449.5
+    },
+    {
+      "day": 4,
+      "wall_s": 109.9,
+      "controller_s": 102.4,
+      "sim_s": 7.5,
+      "ingest_s": 21.0,
+      "decide_s": 81.4,
+      "peak_rss_mb": 449.5
+    }
+  ],
+  "controller_peak_rss_mb": 450,
+  "simulator_peak_rss_mb": 772,
+  "scenario": "public_03_load.yaml",
+  "host": {
+    "cpus": 10,
+    "platform": "darwin"
+  }
+}
