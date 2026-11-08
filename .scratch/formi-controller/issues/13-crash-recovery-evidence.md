@@ -12,8 +12,12 @@ Spec: user story 69.
 
 **Blocked by:** 04
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] Script runs unattended and exits non-zero if any check fails
-- [ ] Log records kill times, restart times and each check's result
-- [ ] A run of the script passes against the current controller
+- [x] Script runs unattended and exits non-zero if any check fails
+- [x] Log records kill times, restart times and each check's result
+- [x] A run of the script passes against the current controller
+
+## Comments
+
+Script: `scripts/crash_recovery.py`; log: `reports/crash_recovery_public_02.md` (3 SIGKILLs, all checks pass; re-run in ticket 15). Grade tolerance is 0.03 absolute conclusion rate, a chosen figure rather than a measured noise floor.
