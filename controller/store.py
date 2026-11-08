@@ -184,6 +184,11 @@ CREATE TABLE IF NOT EXISTS experiments (
     screen_minute  INTEGER,
     last_look_day  INTEGER,            -- the day of the latest daily look
     candidates     TEXT,               -- JSON: the candidate per dimension, once the screen has chosen
+    confirm_version INTEGER,           -- the config version the 50/50 went live in: its data starts here
+    confirm_minute  INTEGER,
+    confirm_plan    TEXT,              -- JSON: per candidate dimension, its split and planned sample
+    confirm_looks   INTEGER NOT NULL DEFAULT 0,  -- looks that had at least half the planned sample
+    verdicts        TEXT,              -- JSON: per dimension, the look that settled it
     end_minute     INTEGER,
     end_reason     TEXT,
     split_live   INTEGER NOT NULL DEFAULT 0,  -- 1: it has ended, and its split may still be live
@@ -209,8 +214,8 @@ def connect(path: str | Path, readonly: bool = False) -> sqlite3.Connection:
 
 def experiment_view(r: sqlite3.Row) -> dict:
     """An experiment as the audit and the query interface show it."""
-    return {**{k: r[k] for k in r.keys() if k not in ("design", "candidates")}, "design": json.loads(r["design"]),
-            "candidates": json.loads(r["candidates"]) if r["candidates"] else {}}
+    documents = ("design", "candidates", "confirm_plan", "verdicts")
+    return {**{k: r[k] for k in r.keys() if k not in documents}, **{k: json.loads(r[k]) if r[k] else {} for k in documents}}
 
 
 def load_partition(conn: sqlite3.Connection, workflow_id: str) -> Partition | None:
@@ -444,6 +449,26 @@ class Store:
             "AND (?4 IS NULL OR a.day * 24 + a.hour < ?4) AND a.cohort_id NOT IN (SELECT value FROM json_each(?5)) "
             "GROUP BY a.config_version, v.welcome_message, v.voice",
             (workflow_id, first_version, last_version, before_hour, json.dumps(list(excluded_cohorts)))).fetchall()
+
+    def arm_cell_counts(self, workflow_id: str, first_version: int, excluded_cohorts: Collection[str] = ()) -> list[sqlite3.Row]:
+        """Per config version, welcome message, voice and feature cell: dials, connected calls and how many engaged."""
+        return self.conn.execute(
+            "SELECT a.config_version config_version, v.welcome_message welcome_message, v.voice voice, lang, city_tier, "
+            "age_band, value_band, SUM(a.dials) dials, SUM(a.connected) connected, SUM(a.engaged) engaged "
+            "FROM cell_agg a JOIN variants v USING (variant_id) JOIN feature_cells USING (cell_id) "
+            "WHERE a.workflow_id = ?1 AND a.config_version >= ?2 AND a.cohort_id NOT IN (SELECT value FROM json_each(?3)) "
+            "GROUP BY a.config_version, v.welcome_message, v.voice, a.cell_id",
+            (workflow_id, first_version, json.dumps(list(excluded_cohorts)))).fetchall()
+
+    def option_counts(self, workflow_id: str, first_hour: int, last_hour: int) -> list[sqlite3.Row]:
+        """Per welcome message, voice, caller ID and feature cell, call counters between two hours since D0 (inclusive)."""
+        return self.conn.execute(
+            "SELECT v.welcome_message welcome_message, v.voice voice, v.caller_id caller_id, lang, city_tier, age_band, "
+            "value_band, SUM(a.dials) dials, SUM(a.connected) connected, SUM(a.engaged) engaged "
+            "FROM cell_agg a JOIN variants v USING (variant_id) JOIN feature_cells USING (cell_id) "
+            "WHERE a.workflow_id = ?1 AND a.day BETWEEN ?2 AND ?3 AND a.day * 24 + a.hour BETWEEN ?4 AND ?5 "
+            "GROUP BY v.welcome_message, v.voice, v.caller_id, a.cell_id",
+            (workflow_id, first_hour // 24, last_hour // 24, first_hour, last_hour)).fetchall()
 
     def active_leads_by_cell(self, workflow_id: str, first_active_day: int) -> list[sqlite3.Row]:
         """Per feature cell, the leads of campaigns created since that day."""

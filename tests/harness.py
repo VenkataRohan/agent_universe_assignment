@@ -140,6 +140,12 @@ class Trouble(httpx.BaseTransport):
     - `lift` / `dampen`: workflow -> caller ID that looks better (one in five of its unanswered dials
       connects) or mildly worse (one in four of its answered calls never connects).
     - `dull`: workflow -> welcome or voice options whose answered calls never engage.
+    - `engagement`: workflow -> {voice: fraction}: answered calls with that voice engage at exactly that rate.
+    - `steady_pickup`: workflows where exactly one in four dials connects for each voice, so arms can't differ on pickup by chance.
+    - `muted`: workflow -> voices of which one in four answered calls never connects (pickup falls, engagement doesn't).
+    - `harmed`: workflow -> (voice, features) whose answered calls never engage for leads matching `features`.
+    - `voice_only`: the controller is shown no spare welcome messages or caller IDs, so voice is the only thing
+      it can experiment on and no other change starts a new config version.
     - `primary`: workflow -> the primary KPI the controller is shown for it, instead of its own.
     - `no_experiments`: the controller is shown no spare welcome messages or voices, so it has nothing to
       experiment on and a test about something else keeps its traffic and its one in-flight Proposal.
@@ -160,6 +166,14 @@ class Trouble(httpx.BaseTransport):
         self.lift: dict[str, str] = {}
         self.dampen: dict[str, str] = {}
         self.dull: dict[str, set[str]] = {}
+        self.engagement: dict[str, dict[str, float]] = {}
+        self.steady_pickup: set[str] = set()
+        self._steady: dict[int, bool] = {}
+        self._steady_dials: Counter[str] = Counter()
+        self.muted: dict[str, set[str]] = {}
+        self.harmed: dict[str, tuple[str, dict[str, list[str]]]] = {}
+        self.voice_only = False
+        self._lead_features: dict[str, dict[str, str]] = {}
         self.primary: dict[str, str] = {}
         self.no_experiments = False
         self._seen = 0
@@ -204,7 +218,7 @@ class Trouble(httpx.BaseTransport):
         if path.endswith("/config/history"):
             resp.read()
             return httpx.Response(200, json=[self._relabel(e) for e in resp.json()])
-        if path == "/workflows" and (self._approval_only or self.primary or self.no_experiments):
+        if path == "/workflows" and (self._approval_only or self.primary or self.no_experiments or self.voice_only):
             resp.read()
             return httpx.Response(200, json=[self._view(w, request) for w in resp.json()])
         return resp
@@ -214,6 +228,8 @@ class Trouble(httpx.BaseTransport):
             workflow = self._approval_only_view(workflow, request)
         elif self.no_experiments:
             workflow = {**workflow, "options": self._options_in_use(workflow, request, ("welcome_message", "voice"))}
+        elif self.voice_only:
+            workflow = {**workflow, "options": self._options_in_use(workflow, request, ("welcome_message", "caller_id"))}
         return self._primary_view(workflow)
 
     def _primary_view(self, workflow: dict) -> dict:
@@ -255,13 +271,46 @@ class Trouble(httpx.BaseTransport):
     def _rewrite_event(self, ev: dict) -> dict:
         if ev["type"] == "config_changed":
             return self._relabel(ev)
+        if ev["type"] == "lead":
+            self._lead_features[ev["lead_id"]] = ev["features"]
         if ev["type"] == "call" and ev["connected"] and ev["variant"]["caller_id"] == self._degrade.get(ev["workflow_id"]):
             self._seen += 1
             if self._seen % 5:  # four in five of its answered calls never connect
                 return {**ev, "connected": False, "engaged": False, "disposition": "no_answer", "duration_s": 0,
                         "turns": 0, "qa": None}
         if ev["type"] == "call":
-            return self._dull_engagement(self._reshape_pickup(ev))
+            return self._harm(self._set_engagement(self._dull_engagement(self._mute(self._steady_pickup(self._reshape_pickup(ev))))))
+        return ev
+
+    # Decided from the event ID, or remembered by it: the test oracle reads the same chunks again and must see the same calls.
+    def _mute(self, ev: dict) -> dict:
+        if ev["connected"] and ev["variant"]["voice"] in self.muted.get(ev["workflow_id"], set()) and ev["event_id"] % 4 == 0:
+            return {**ev, "connected": False, "engaged": False, "disposition": "no_answer", "duration_s": 0, "turns": 0, "qa": None}
+        return ev
+
+    def _steady_pickup(self, ev: dict) -> dict:
+        if ev["workflow_id"] not in self.steady_pickup:
+            return ev
+        if ev["event_id"] not in self._steady:  # remembered: the test oracle reads the same chunks again
+            voice = ev["variant"]["voice"]
+            self._steady_dials[voice] += 1
+            self._steady[ev["event_id"]] = self._steady_dials[voice] % 4 == 0
+        if self._steady[ev["event_id"]]:
+            return {**ev, "connected": True, "qa": ev["qa"] or {"hallucination_flag": False, "flow_adherence": 1.0}}
+        return {**ev, "connected": False, "engaged": False, "disposition": "no_answer", "duration_s": 0, "turns": 0, "qa": None}
+
+    def _set_engagement(self, ev: dict) -> dict:
+        rate = self.engagement.get(ev["workflow_id"], {}).get(ev["variant"]["voice"])
+        if rate is None or not ev["connected"]:
+            return ev
+        engaged = ev["event_id"] % 100 < rate * 100
+        return {**ev, "engaged": engaged, "disposition": "concluded_interested" if engaged else "short_hangup"}
+
+    def _harm(self, ev: dict) -> dict:
+        voice, where = self.harmed.get(ev["workflow_id"], (None, {}))
+        features = self._lead_features.get(ev["lead_id"], {})
+        if ev["variant"]["voice"] == voice and ev["engaged"] and where and all(features.get(f) in v for f, v in where.items()):
+            return {**ev, "engaged": False, "disposition": "short_hangup"}
         return ev
 
     def _dull_engagement(self, ev: dict) -> dict:

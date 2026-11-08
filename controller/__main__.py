@@ -191,7 +191,13 @@ def _experiment_line(e: dict) -> str:
     if e["candidates"]:
         line += "; candidates " + ", ".join(f"{d} {o}" for d, o in sorted(e["candidates"].items()))
     eliminated = [o for view in (e["dimensions"] or {}).values() for o in view.get("eliminated", [])]
-    return line + (f"; eliminated {', '.join(eliminated)}" if eliminated else "")
+    line += f"; eliminated {', '.join(eliminated)}" if eliminated else ""
+    if e["confirm_version"] is not None:
+        line += f"; confirm looks {e['confirm_looks']}"
+    for d, v in sorted(e["verdicts"].items()):
+        if "candidate" in v:
+            line += f"; {d} {v['candidate']}: {v['status']}"
+    return line
 
 
 def _decision_reason(detail: dict) -> str:

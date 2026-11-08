@@ -11,6 +11,8 @@ _NORMAL = NormalDist()
 CONFIRM_ALPHA_PER_LOOK = 0.05 / 3  # at most 3 daily looks share the 5% false-winner rate
 CONFIRM_RELATIVE_MDE = 0.10
 CONFIRM_POWER = 0.80
+CONFIRM_MAX_LOOKS = 3
+CONFIRM_MAX_DAYS = 7  # how long a confirm may wait for half its planned sample before it ends undecided (ADR-0011)
 GUARDRAIL_ALPHA = 0.05
 HARM_ALPHA = 0.10  # per cohort, deliberately uncorrected: a harm check should err towards blocking
 DECAY_ALPHA = 0.05
@@ -75,6 +77,21 @@ def beats_control(challenger: Counts, control: Counts) -> Verdict:
     return _one_sided(challenger, control, CONFIRM_ALPHA_PER_LOOK)
 
 
+def beats_control_strata(pairs: Sequence[tuple[Counts, Counts]]) -> Verdict:
+    """`beats_control` over (challenger, control) strata. With one stratum it is the same test."""
+    p = _p_greater_strata(pairs)
+    return Verdict(p < CONFIRM_ALPHA_PER_LOOK, p)
+
+
+def _p_greater_strata(pairs: Sequence[tuple[Counts, Counts]]) -> float:
+    """One-sided p-value for "the first of each pair is above the second", combined over strata."""
+    ran = [(a, b) for a, b in pairs if a.trials and b.trials]
+    if not ran:
+        return 1.0
+    difference, variance = _stratified_difference(ran)
+    return _NORMAL.cdf(-difference / math.sqrt(variance)) if variance else 1.0
+
+
 def sample_size_per_arm(baseline_rate: float, relative_mde: float, alpha: float, power: float) -> int:
     """Calls each arm needs for a one-sided two-proportion test to detect a relative lift."""
     lifted = baseline_rate * (1 + relative_mde)
@@ -106,6 +123,19 @@ def difference_lower_bound(a: Counts, b: Counts, confidence: float = IMPACT_CONF
     return a.rate - b.rate - _NORMAL.inv_cdf(confidence) * math.sqrt(variance)
 
 
+def difference_lower_bound_strata(pairs: Sequence[tuple[Counts, Counts]], confidence: float = IMPACT_CONFIDENCE) -> float:
+    """`difference_lower_bound` over strata, with the same Mantel-Haenszel weights as the tests."""
+    ran = [(a, b) for a, b in pairs if a.trials and b.trials]
+    if not ran:
+        return -1.0
+    weights = [a.trials * b.trials / (a.trials + b.trials) for a, b in ran]
+    total = sum(weights)
+    difference = sum(w * (a.rate - b.rate) for w, (a, b) in zip(weights, ran)) / total
+    variance = sum(w ** 2 * (a.rate * (1 - a.rate) / a.trials + b.rate * (1 - b.rate) / b.trials)
+                   for w, (a, b) in zip(weights, ran)) / total ** 2
+    return difference - _NORMAL.inv_cdf(confidence) * math.sqrt(variance)
+
+
 def guardrail_non_inferior(candidate: Counts, control: Counts, max_drop: float,
                            alpha: float = GUARDRAIL_ALPHA) -> GuardrailCheck:
     """Non-inferiority: the lower bound of the guardrail difference must not fall below -max_drop."""
@@ -113,10 +143,25 @@ def guardrail_non_inferior(candidate: Counts, control: Counts, max_drop: float,
     return GuardrailCheck(lower >= -max_drop, lower)
 
 
+def guardrail_non_inferior_strata(pairs: Sequence[tuple[Counts, Counts]], max_drop: float) -> GuardrailCheck:
+    """`guardrail_non_inferior` over (candidate, control) strata."""
+    lower = difference_lower_bound_strata(pairs, 1 - GUARDRAIL_ALPHA)
+    return GuardrailCheck(lower >= -max_drop, lower)
+
+
 def cohort_harm(arms: Mapping[str, tuple[Counts, Counts]]) -> dict[str, Verdict]:
     """For each cohort's (candidate, control) counts: is the candidate significantly worse there?"""
     return {cohort: _one_sided(control, candidate, HARM_ALPHA)
             for cohort, (candidate, control) in sorted(arms.items())}
+
+
+def cohort_harm_strata(arms: Mapping[str, Sequence[tuple[Counts, Counts]]]) -> dict[str, Verdict]:
+    """`cohort_harm` where each cohort has (candidate, control) strata."""
+    out = {}
+    for cohort, pairs in sorted(arms.items()):
+        p = _p_greater_strata([(control, candidate) for candidate, control in pairs])
+        out[cohort] = Verdict(p < HARM_ALPHA, p)
+    return out
 
 
 def decayed(winner: Counts, holdback: Counts) -> Verdict:

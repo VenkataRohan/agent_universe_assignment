@@ -78,7 +78,7 @@ def test_the_daily_look_eliminates_the_clearly_worse_and_leaves_one_candidate_pe
     Controller(troubled, db_path).run()
 
     exp = experiments(db_path, "nw_renewal")[0]
-    assert exp["status"] == "screened"
+    assert exp["status"] in PAST_THE_SCREEN
     assert set(exp["candidates"]) <= {"welcome_message", "voice"} and exp["candidates"].get("voice") != "V2"
     waited, screened = looks(db_path, "nw_renewal", "waiting_for_data"), looks(db_path, "nw_renewal", "screened")
     assert [d["minute"] for d in waited] == [1440 + 540] and [d["minute"] for d in screened] == [2 * 1440 + 540]
@@ -95,15 +95,14 @@ def test_nothing_is_promoted_from_a_screen(world, db_path):
 
     Controller(troubled, db_path).run()
 
-    assert experiments(db_path, "nw_renewal")[0]["status"] == "screened"
+    assert experiments(db_path, "nw_renewal")[0]["status"] in PAST_THE_SCREEN
     default = client.get("/workflows/nw_renewal/config").json()["config"]["allocations"]["default"]
     assert share(default["welcome_message"], "W1") >= 0.5 and share(default["voice"], "V1") >= 0.5
-    changed_arms = [h for h in client.get("/workflows/nw_renewal/config/history").json()
-                    if {"welcome_message", "voice"} & set(h["changed_dims"])]
-    assert [h["proposal_id"] for h in changed_arms] == [screens(db_path, "nw_renewal")[0]["proposal_id"]]
+    assert [p for p in queries.proposals(db_path, "nw_renewal") if p["kind"] == "experiment_promote"] == []
 
 
 CHALLENGERS = {"W2", "W3", "V2", "V3", "V4"}
+PAST_THE_SCREEN = ("screened", "confirm_requested", "confirming")  # a chosen candidate goes straight on to confirm
 
 
 def test_a_screen_with_no_challenger_ahead_of_control_ends_with_no_candidate_and_returns_to_control(world, db_path):
@@ -201,7 +200,7 @@ def test_a_supervisor_edit_elsewhere_keeps_the_screen_going_in_a_separate_stratu
     controller.run()
 
     exp = experiments(db_path, "nw_renewal")[0]
-    assert exp["status"] == "screened"
+    assert exp["status"] in PAST_THE_SCREEN
     strata = looks(db_path, "nw_renewal", "screened")[0]["detail"]["strata"]
     assert running["screen_version"] in strata and version in strata
 
@@ -278,7 +277,7 @@ def test_why_shows_the_experiment_as_it_stood_and_the_screens_decisions(world, d
     assert before["experiment"]["status"] == "screening" and before["experiment"]["candidates"] == {}
     assert after["experiment"]["status"] == "screened" and after["experiment"]["candidates"] == exp["candidates"]
     assert "V2" in after["experiment"]["dimensions"]["voice"]["eliminated"]
-    outcomes = [d["outcome"] for d in after["decisions"] if d["kind"] == "experiment" and d["outcome"] != "held"]
+    outcomes = [d["outcome"] for d in after["decisions"] if d["kind"] == "experiment" and d["outcome"] not in ("held", "confirm_held")]
     assert outcomes[:2] == ["planned", "screen_requested"] and outcomes[-2:] == ["waiting_for_data", "screened"]
 
     assert cli_main(["why", "nw_renewal", "--at", "D2 09:00", "--db", str(db_path)]) == 0

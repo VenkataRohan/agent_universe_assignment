@@ -1,18 +1,18 @@
 """What a Proposal predicts: its dry run and the leads it will reach. Read-only over the store.
 
 The dry run replays the last 3 days' traffic under the current and the proposed allocation, using
-each caller ID's own measured rates, so the only thing that differs between the two is the mix.
+each option's own measured rates, so the only thing that differs between the two is the mix.
 """
 from __future__ import annotations
 
 import math
 import sqlite3
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from statistics import NormalDist
 from typing import NamedTuple
 
 from .cohorts import FEATURES, Partition
-from .composer import ALLOCATION_DIMS, Composed, caller_id_dist, config_cohort_of, effective_dist
+from .composer import ALLOCATION_DIMS, Composed, config_cohort_of, effective_dist
 from .simtime import MINUTES_PER_DAY
 from .store import Store, load_partition
 
@@ -27,10 +27,14 @@ class Calls(NamedTuple):
 
 
 def calls_by_caller(rows: Iterable[sqlite3.Row]) -> dict[str, Calls]:
+    return _calls_by(rows, "caller_id")
+
+
+def _calls_by(rows: Iterable[sqlite3.Row], dim: str) -> dict[str, Calls]:
     out: dict[str, Calls] = {}
     for r in rows:
-        c = out.get(r["caller_id"], Calls())
-        out[r["caller_id"]] = Calls(c.dials + r["dials"], c.connected + r["connected"], c.engaged + r["engaged"])
+        c = out.get(r[dim], Calls())
+        out[r[dim]] = Calls(c.dials + r["dials"], c.connected + r["connected"], c.engaged + r["engaged"])
     return out
 
 
@@ -51,7 +55,7 @@ def affected_leads(store: Store, workflow: Mapping, composed: Composed, now: int
 
 def dry_run(store: Store, workflow: Mapping, composed: Composed, now: int) -> dict:
     wf, hour = workflow["workflow_id"], now // 60
-    rows = store.caller_id_counts(wf, hour - DRY_RUN_HOURS + 1, hour)
+    rows = store.option_counts(wf, hour - DRY_RUN_HOURS + 1, hour)
     before, after = composed.base_config, composed.config
     objective = workflow["objective"]
     primary, guardrail = objective["primary"], next(iter(objective["guardrail"])).removesuffix("_max_drop")
@@ -78,16 +82,34 @@ def _cohort_replays(rows: list, before: Mapping, after: Mapping, partition: Part
 
 def _replay(rows: list, before: Mapping, after: Mapping) -> dict:
     """Predicted KPIs of this traffic under both allocations, with 95% margins on the proposed ones."""
+    # Welcome and voice are heard after pickup, so only caller ID moves the pickup prediction (ADR-0007).
+    return {"pickup_rate": _predict(rows, before, after, _pickup, ()),
+            "engagement_rate": _predict(rows, before, after, _engagement, ("welcome_message", "voice"))}
+
+
+_Rate = Callable[[Mapping[str, Calls], Mapping[str, float]], tuple[float | None, float]]
+
+
+def _predict(rows: list, before: Mapping, after: Mapping, rate: _Rate, heard_dims: tuple[str, ...]) -> dict:
+    """The rate under the caller-ID mix, moved by how far any change in the mix of `heard_dims` moves it."""
     per_caller = calls_by_caller(rows)
-    current, proposed = _mix(rows, before), _mix(rows, after)
-    pickup, engagement = _pickup(per_caller, proposed), _engagement(per_caller, proposed)
-    return {"pickup_rate": {"current": _pickup(per_caller, current)[0], "proposed": pickup[0], "margin": pickup[1]},
-            "engagement_rate": {"current": _engagement(per_caller, current)[0], "proposed": engagement[0],
-                                "margin": engagement[1]}}
+    current, _ = rate(per_caller, _mix(rows, before, "caller_id"))
+    proposed, margin = rate(per_caller, _mix(rows, after, "caller_id"))
+    variance = margin ** 2
+    for dim in heard_dims:
+        mix_before, mix_after = _mix(rows, before, dim), _mix(rows, after, dim)
+        if mix_before == mix_after or proposed is None:
+            continue
+        calls = _calls_by(rows, dim)
+        (was, _), (will_be, moved_margin) = rate(calls, mix_before), rate(calls, mix_after)
+        if was is not None and will_be is not None:
+            proposed += will_be - was
+            variance += moved_margin ** 2
+    return {"current": current, "proposed": None if proposed is None else round(proposed, 4), "margin": round(math.sqrt(variance), 4)}
 
 
-def _mix(rows: list, config: Mapping) -> dict[str, float]:
-    """The share of this traffic each caller ID would carry under `config`."""
+def _mix(rows: list, config: Mapping, dim: str) -> dict[str, float]:
+    """The share of this traffic each option of `dim` would carry under `config`."""
     by_cell: dict[tuple, int] = {}
     for r in rows:
         key = tuple(r[f] for f in FEATURES)
@@ -95,7 +117,7 @@ def _mix(rows: list, config: Mapping) -> dict[str, float]:
     total = sum(by_cell.values())
     mix: dict[str, float] = {}
     for key, dials in by_cell.items():
-        for c, w in caller_id_dist(config, config_cohort_of(config, dict(zip(FEATURES, key)))).items():
+        for c, w in effective_dist(config, config_cohort_of(config, dict(zip(FEATURES, key))), dim).items():
             mix[c] = mix.get(c, 0.0) + w * dials / total
     return mix
 

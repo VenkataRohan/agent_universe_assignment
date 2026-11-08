@@ -339,3 +339,57 @@ def test_a_stratum_where_an_arm_never_ran_contributes_nothing_to_that_arm():
     no_challenger = (stats.Counts(900, 1000), {"W2": stats.Counts(0, 0)})
 
     assert stats.screen_strata([ran, empty, no_challenger]) == stats.screen(*ran)
+
+
+# -- the confirm stage, over strata ----------------------------------------------------------------
+def test_stratified_confirm_test_with_one_stratum_is_the_plain_z_test():
+    challenger, control = stats.Counts(330, 600), stats.Counts(270, 600)
+    assert stats.beats_control_strata([(challenger, control)]) == stats.beats_control(challenger, control)
+
+
+def test_stratified_confirm_test_matches_a_worked_example():
+    # Strata of (60/100 vs 50/100) and (30/100 vs 20/100): each has weight 50 and difference 0.10, so the
+    # combined difference is 0.10. Pooled rates 0.55 and 0.25 give variance 21.75/10000, so z = 2.1442.
+    verdict = stats.beats_control_strata([(stats.Counts(60, 100), stats.Counts(50, 100)),
+                                          (stats.Counts(30, 100), stats.Counts(20, 100))])
+    assert verdict.p_value == pytest.approx(0.01601, abs=2e-4)
+    assert verdict.holds  # below 0.05/3 = 0.01667
+
+
+def test_a_config_change_between_strata_cannot_pass_for_a_difference_between_arms():
+    # Inside each stratum the arms are level; the challenger just ran mostly in the better one.
+    good, bad = (stats.Counts(720, 900), stats.Counts(80, 100)), (stats.Counts(20, 100), stats.Counts(180, 900))
+    assert stats.beats_control(stats.Counts(740, 1000), stats.Counts(260, 1000)).holds
+    assert stats.beats_control_strata([good, bad]).p_value == pytest.approx(0.5)
+
+
+def test_stratified_lower_bound_with_one_stratum_is_the_plain_bound():
+    a, b = stats.Counts(300, 500), stats.Counts(250, 500)
+    assert stats.difference_lower_bound_strata([(a, b)], 0.8) == pytest.approx(stats.difference_lower_bound(a, b, 0.8))
+
+
+def test_stratified_lower_bound_matches_a_worked_example():
+    # Equal weights: difference 0.10, variance (0.24/100 + 0.25/100 + 0.21/100 + 0.16/100) / 4 = 0.00215,
+    # so the 80% bound is 0.10 - 0.8416 * 0.04637 = 0.06097.
+    bound = stats.difference_lower_bound_strata([(stats.Counts(60, 100), stats.Counts(50, 100)),
+                                                 (stats.Counts(30, 100), stats.Counts(20, 100))], 0.8)
+    assert bound == pytest.approx(0.06097, abs=2e-4)
+
+
+def test_stratified_lower_bound_with_no_data_is_the_worst_case():
+    assert stats.difference_lower_bound_strata([(stats.Counts(0, 0), stats.Counts(5, 10))], 0.8) == -1.0
+
+
+def test_stratified_guardrail_fails_when_the_bound_is_below_the_allowed_drop():
+    level = [(stats.Counts(250, 1000), stats.Counts(250, 1000)), (stats.Counts(500, 2000), stats.Counts(500, 2000))]
+    # Level arms over 3000 dials each: bound = -1.645 * sqrt(2 * 0.1875 / 3000) = -0.01839, ignoring the rounding of weights.
+    assert stats.guardrail_non_inferior_strata(level, 0.02).passed
+    failed = stats.guardrail_non_inferior_strata(level, 0.015)
+    assert not failed.passed and failed.lower_bound == pytest.approx(-0.0184, abs=3e-4)
+
+
+def test_stratified_harm_check_names_only_the_harmed_cohort():
+    harm = stats.cohort_harm_strata({
+        "young": [(stats.Counts(40, 100), stats.Counts(60, 100))],
+        "old": [(stats.Counts(50, 100), stats.Counts(50, 100))]})
+    assert harm["young"].holds and not harm["old"].holds

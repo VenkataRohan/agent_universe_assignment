@@ -114,11 +114,14 @@ The one challenger per dimension a screen sends forward to confirm. Not a winner
 **Confirm**:
 The second stage: one candidate against control, judged on fresh data only.
 
+**Look**:
+One daily judgement of a confirm, made once every arm has at least half its planned sample. A confirm gets at most three.
+
 **Analysis partition**:
 The one set of cohorts per workflow, chosen from history, over which promotions are checked for harm and call time is tuned.
 
 **Winner**:
-A challenger that beat control on the primary KPI and passed the guardrail, under the experiment's test.
+A challenger that beat control on the primary KPI, passed the guardrail and harmed no cohort of the analysis partition, under the experiment's test.
 
 **Promotion**:
 Moving a winner from experiment share to most of the workflow's traffic.
