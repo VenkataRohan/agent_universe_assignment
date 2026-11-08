@@ -192,6 +192,11 @@ CREATE TABLE IF NOT EXISTS experiments (
     end_minute     INTEGER,
     end_reason     TEXT,
     split_live   INTEGER NOT NULL DEFAULT 0,  -- 1: it has ended, and its split may still be live
+    promote_version INTEGER,           -- the config version the promotion went live in: decay is judged from here
+    promote_minute  INTEGER,
+    holdbacks       TEXT,              -- JSON: per dimension still held back, its winner and its control
+    decay           TEXT,              -- JSON: the decay signal a rollback is being asked for
+    clean_since_minute INTEGER,        -- the promotion, or the latest decay signal: the holdback's clean days count from here
     UNIQUE (workflow_id, seq)
 );
 """
@@ -214,7 +219,7 @@ def connect(path: str | Path, readonly: bool = False) -> sqlite3.Connection:
 
 def experiment_view(r: sqlite3.Row) -> dict:
     """An experiment as the audit and the query interface show it."""
-    documents = ("design", "candidates", "confirm_plan", "verdicts")
+    documents = ("design", "candidates", "confirm_plan", "verdicts", "holdbacks", "decay")
     return {**{k: r[k] for k in r.keys() if k not in documents}, **{k: json.loads(r[k]) if r[k] else {} for k in documents}}
 
 
@@ -428,6 +433,12 @@ class Store:
         return self.conn.execute("SELECT * FROM experiments WHERE workflow_id = ? ORDER BY seq DESC LIMIT 1",
                                  (workflow_id,)).fetchone()
 
+    def applied_carrying(self, workflow_id: str, evidence_key: str, experiment_id: str) -> sqlite3.Row | None:
+        """The applied Proposal whose evidence carries this entry for this experiment, if one has."""
+        return self.conn.execute("SELECT * FROM proposals WHERE workflow_id = ? AND status = 'applied' "
+                                 "AND json_extract(body, ?) = ?",
+                                 (workflow_id, f"$.evidence.{evidence_key}.experiment_id", experiment_id)).fetchone()
+
     def config_changes_after(self, workflow_id: str, version: int) -> list[dict]:
         """The world's `config_changed` events for versions after this one, oldest first."""
         events = (json.loads(r[0]) for r in self.conn.execute(
@@ -450,15 +461,20 @@ class Store:
             "GROUP BY a.config_version, v.welcome_message, v.voice",
             (workflow_id, first_version, last_version, before_hour, json.dumps(list(excluded_cohorts)))).fetchall()
 
-    def arm_cell_counts(self, workflow_id: str, first_version: int, excluded_cohorts: Collection[str] = ()) -> list[sqlite3.Row]:
-        """Per config version, welcome message, voice and feature cell: dials, connected calls and how many engaged."""
+    def arm_cell_counts(self, workflow_id: str, first_version: int, excluded_cohorts: Collection[str] = (),
+                        first_hour: int | None = None, before_hour: int | None = None) -> list[sqlite3.Row]:
+        """Per config version, welcome message, voice and feature cell: dials, connected calls and how many engaged.
+
+        `first_hour` and `before_hour` (hours since D0) keep only the calls from the first up to, not including, the second.
+        """
         return self.conn.execute(
             "SELECT a.config_version config_version, v.welcome_message welcome_message, v.voice voice, lang, city_tier, "
             "age_band, value_band, SUM(a.dials) dials, SUM(a.connected) connected, SUM(a.engaged) engaged "
             "FROM cell_agg a JOIN variants v USING (variant_id) JOIN feature_cells USING (cell_id) "
             "WHERE a.workflow_id = ?1 AND a.config_version >= ?2 AND a.cohort_id NOT IN (SELECT value FROM json_each(?3)) "
+            "AND (?4 IS NULL OR a.day * 24 + a.hour >= ?4) AND (?5 IS NULL OR a.day * 24 + a.hour < ?5) "
             "GROUP BY a.config_version, v.welcome_message, v.voice, a.cell_id",
-            (workflow_id, first_version, json.dumps(list(excluded_cohorts)))).fetchall()
+            (workflow_id, first_version, json.dumps(list(excluded_cohorts)), first_hour, before_hour)).fetchall()
 
     def option_counts(self, workflow_id: str, first_hour: int, last_hour: int) -> list[sqlite3.Row]:
         """Per welcome message, voice, caller ID and feature cell, call counters between two hours since D0 (inclusive)."""

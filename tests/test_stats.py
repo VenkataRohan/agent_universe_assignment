@@ -393,3 +393,24 @@ def test_stratified_harm_check_names_only_the_harmed_cohort():
         "young": [(stats.Counts(40, 100), stats.Counts(60, 100))],
         "old": [(stats.Counts(50, 100), stats.Counts(50, 100))]})
     assert harm["young"].holds and not harm["old"].holds
+
+
+# -- decay against the holdback, over strata ------------------------------------------------------
+def test_one_stratum_of_decay_is_the_plain_decay_test():
+    winner, holdback = stats.Counts(500, 1000), stats.Counts(537, 1000)
+    assert stats.decayed_strata([(winner, holdback)]) == stats.decayed(winner, holdback)
+
+
+def test_a_config_change_between_strata_cannot_pass_for_decay():
+    # Pooled, the winner is 540/1000 against the holdback's 500/600, but inside each version the two are level.
+    high = (stats.Counts(90, 100), stats.Counts(450, 500))
+    low = (stats.Counts(450, 900), stats.Counts(50, 100))
+    assert stats.decayed(stats.Counts(540, 1000), stats.Counts(500, 600)).holds
+    verdict = stats.decayed_strata([high, low])
+    assert verdict.p_value == pytest.approx(0.5) and not verdict.holds
+
+
+def test_a_stratum_with_no_holdback_calls_adds_nothing_to_decay():
+    only = (stats.Counts(500, 1000), stats.Counts(537, 1000))
+    assert stats.decayed_strata([only, (stats.Counts(40, 80), stats.Counts(0, 0))]) == stats.decayed(*only)
+    assert stats.decayed_strata([]) == stats.Verdict(False, 1.0)

@@ -169,6 +169,12 @@ def decayed(winner: Counts, holdback: Counts) -> Verdict:
     return _one_sided(holdback, winner, DECAY_ALPHA)
 
 
+def decayed_strata(pairs: Sequence[tuple[Counts, Counts]]) -> Verdict:
+    """`decayed` over (winner, holdback) strata. With one stratum it is the same test."""
+    p = _p_greater_strata([(holdback, winner) for winner, holdback in pairs])
+    return Verdict(p < DECAY_ALPHA, p)
+
+
 @dataclass(frozen=True)
 class ScreenResult:
     candidate: str | None        # the challenger to confirm; None ends the experiment

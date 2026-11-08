@@ -1,7 +1,8 @@
-"""Experiment engine: each experiment's state machine and its daily look (ADR-0005, 0006, 0007, 0008, 0010, 0011).
+"""Experiment engine: each experiment's state machine and its daily look (ADR-0005, 0006, 0007, 0008, 0010, 0011, 0012).
 
     planned -> screen_requested -> screening -> screened -> confirm_requested -> confirming
-            -> confirmed -> promote_requested -> promoted
+            -> confirmed -> promote_requested -> promoted -> released
+    promoted -> decayed -> rollback_requested -> rolled_back (or promoted again, for any winner still held back)
     any -> inconclusive | aborted
 
 Every state change is committed with its decision, and each decision carries the experiment as it
@@ -13,11 +14,12 @@ import json
 import math
 import sqlite3
 from collections.abc import Iterable, Mapping
+from dataclasses import replace
 from typing import Any
 
 from . import stats
 from .cohorts import FEATURES, KPI_COUNTERS
-from .composer import Composed, compose, effective_dist, normalised, set_distribution, violations
+from .composer import Composed, compose, effective_dist, extend, normalised, set_distribution, violations
 from .governance import APPLIED, EXPIRED, IN_FLIGHT, STALE, Draft, GovernanceClient
 from .simclient import SimClient
 from .simtime import MINUTES_PER_DAY, label, minute_of
@@ -28,9 +30,11 @@ SCREEN_KIND = "experiment_screen"
 CONFIRM_KIND = "experiment_confirm"
 PROMOTE_KIND = "experiment_promote"
 END_KIND = "experiment_end"
+ROLLBACK_KIND = "experiment_rollback"
 PLANNED, SCREEN_REQUESTED, SCREENING, SCREENED = "planned", "screen_requested", "screening", "screened"
 CONFIRM_REQUESTED, CONFIRMING, CONFIRMED = "confirm_requested", "confirming", "confirmed"
 PROMOTE_REQUESTED, PROMOTED = "promote_requested", "promoted"
+DECAYED, ROLLBACK_REQUESTED, ROLLED_BACK, RELEASED = "decayed", "rollback_requested", "rolled_back", "released"
 INCONCLUSIVE, ABORTED = "inconclusive", "aborted"
 RUNNING = (SCREENING, SCREENED, CONFIRM_REQUESTED, CONFIRMING, CONFIRMED, PROMOTE_REQUESTED)  # its split is live
 ASKED_AGAIN = (EXPIRED, STALE)  # nobody said no to these, so the experiment goes back a step and asks afresh
@@ -45,6 +49,9 @@ HOLDBACK_SHARE = 0.2  # stays on control after a promotion (ADR-0008)
 MIN_SIZING_RATE, MAX_SIZING_RATE = 0.01, 0.90  # a rate outside these leaves no room to size a 10% lift
 SUPERVISOR_QUIET_MINUTES = 7 * MINUTES_PER_DAY  # a supervisor's own choice is left to run this long
 LOOK_MINUTE_OF_DAY = 9 * 60
+DECAY_WINDOW_DAYS = 3
+HOLDBACK_CLEAN_MINUTES = 7 * MINUTES_PER_DAY  # without a decay signal, then the holdback may go (ADR-0008)
+RELEASE_EVIDENCE = "holdback_release"  # the key a Proposal carrying a release has in its evidence
 
 
 def respond(store: Store, sim: SimClient, governance: GovernanceClient, workflow: Mapping, now: int) -> None:
@@ -70,6 +77,12 @@ def _advance(store: Store, sim: SimClient, governance: GovernanceClient, workflo
         exp = _follow_confirm(store, exp, now)
     if exp["status"] == PROMOTE_REQUESTED:
         exp = _follow_promotion(store, exp, now)
+    if exp["status"] == ROLLBACK_REQUESTED:
+        exp = _follow_rollback(store, exp, now)
+    if exp["status"] == PROMOTED:
+        exp = _follow_release(store, exp, now)
+    if exp["status"] in (PROMOTED, DECAYED):
+        exp = _stop_watching_edited(store, exp, now)
     if exp["status"] in RUNNING:
         exp = _abort_if_edited(store, exp, now)
     if exp["status"] == SCREENING and _look_due(exp, now):
@@ -80,6 +93,10 @@ def _advance(store: Store, sim: SimClient, governance: GovernanceClient, workflo
         exp = _request_confirm(store, sim, governance, workflow, exp, now)
     if exp["status"] == CONFIRMED:
         exp = _request_promotion(store, sim, governance, workflow, exp, now)
+    if exp["status"] == PROMOTED and _decay_look_due(exp, now):
+        exp = _decay_look(store, workflow, exp, now)
+    if exp["status"] == DECAYED:
+        exp = _request_rollback(store, sim, governance, workflow, exp, now)
     return exp
 
 
@@ -480,7 +497,10 @@ def _follow_promotion(store: Store, exp: sqlite3.Row, now: int) -> sqlite3.Row:
     p = _stage_proposal(store, exp, PROMOTE_KIND)
     assert p is not None  # the move to promote_requested is made after the Proposal exists
     if p["status"] == APPLIED:
-        return _move(store, exp, PROMOTED, now, "promoted", {"proposal_id": p["proposal_id"], "version": p["applied_version"]})
+        holdbacks = {d: {"winner": v["candidate"], "control": v["control"]} for d, v in json.loads(exp["verdicts"]).items() if v["status"] == WINNER}
+        return _move(store, exp, PROMOTED, now, "promoted", {"proposal_id": p["proposal_id"], "version": p["applied_version"]},
+                     promote_version=p["applied_version"], promote_minute=p["applied_minute"], clean_since_minute=p["applied_minute"],
+                     holdbacks=json.dumps(holdbacks, sort_keys=True))
     return exp if p["status"] in IN_FLIGHT else _proposal_ended(store, exp, p, now, CONFIRMED)
 
 
@@ -512,6 +532,157 @@ def _conclusion_gain(rows: list[sqlite3.Row], dim: str, candidate: str, control:
     dials = sum(a["dials"] for a in arms.values())
     pickup = sum(a["connected"] for a in arms.values()) / dials if dials else 0.0
     return stats.difference_lower_bound_strata(_strata(rows, dim, candidate, control, kpi)) * pickup
+
+
+# -- after promotion: decay, rollback and release -----------------------------------------------------
+def _decay_look_due(exp: sqlite3.Row, now: int) -> bool:
+    """Daily, from the third calendar day after the promotion, so the first look has about three days of its calls."""
+    return _look_due(exp, now) and now // MINUTES_PER_DAY - exp["promote_minute"] // MINUTES_PER_DAY >= DECAY_WINDOW_DAYS
+
+
+def _decay_look(store: Store, workflow: Mapping, exp: sqlite3.Row, now: int) -> sqlite3.Row:
+    """Each winner still held back against its holdback, over the last three days of calls under the promoted config."""
+    hour = now // 60
+    first_hour = hour - DECAY_WINDOW_DAYS * 24
+    rows = store.arm_cell_counts(exp["workflow_id"], exp["promote_version"], json.loads(exp["design"])["excluded_cohorts"], first_hour, hour)
+    kpi = workflow["objective"]["primary"]
+    views = {d: _decay_view(rows, d, held, kpi) for d, held in json.loads(exp["holdbacks"]).items()}
+    window = {"first_hour": first_hour, "before_hour": hour, "from": label(first_hour * 60), "to": label(hour * 60)}
+    day = now // MINUTES_PER_DAY
+    decayed = {d: v for d, v in views.items() if v["decayed"]}
+    if not decayed:
+        return _move(store, exp, PROMOTED, now, "no_decay", {"dimensions": views, "window": window}, last_look_day=day)
+    signal = {"minute": now, "window": window, "dimensions": decayed}
+    return _move(store, exp, DECAYED, now, "decayed", {"dimensions": views, "window": window}, last_look_day=day, clean_since_minute=now,
+                 decay=json.dumps(signal, sort_keys=True))
+
+
+def _decay_view(rows: list[sqlite3.Row], dim: str, held: Mapping[str, str], kpi: str) -> dict:
+    winner, control = held["winner"], held["control"]
+    verdict = stats.decayed_strata(_strata(rows, dim, winner, control, kpi))
+    return {"winner": winner, "control": control, "kpi": kpi, "arms": _arm_totals(rows, dim, (winner, control)),
+            "decayed": verdict.holds, "p_value": verdict.p_value, "alpha": stats.DECAY_ALPHA,
+            "return_gain_lower_bound": _conclusion_gain(rows, dim, control, winner, kpi)}
+
+
+def _request_rollback(store: Store, sim: SimClient, governance: GovernanceClient, workflow: Mapping, exp: sqlite3.Row, now: int) -> sqlite3.Row:
+    """Ask for each decayed dimension back. Waits, on this same signal, until a request may go out."""
+    wf = workflow["workflow_id"]
+    decay = json.loads(exp["decay"])
+    sent = store.latest_proposal(wf, ROLLBACK_KIND)
+    if sent is not None and json.loads(sent["body"])["evidence"].get("signal_minute") == decay["minute"]:  # a crash between proposing and recording it
+        return _move(store, exp, ROLLBACK_REQUESTED, now, "rollback_requested", {"proposal_id": sent["proposal_id"]})
+    hold = governance.hold_reason(wf, ROLLBACK_KIND, now)
+    if hold is not None:
+        store.note_decision(now, wf, KIND, "rollback_held", {"experiment_id": exp["experiment_id"], "hold": hold})
+        return exp
+    plans = json.loads(exp["design"])["dimensions"]
+    composed = compose(sim.config(wf), *(set_distribution(d, plans[d]["before"]) for d in decay["dimensions"]))
+    problems = violations(workflow, composed)
+    if problems:
+        store.note_decision(now, wf, KIND, "rollback_blocked", {"experiment_id": exp["experiment_id"], "violations": problems})
+        return exp
+    pid = governance.propose(_rollback_draft(exp, decay, composed), now)
+    return _move(store, exp, ROLLBACK_REQUESTED, now, "rollback_requested", {"proposal_id": pid})
+
+
+def _rollback_draft(exp: sqlite3.Row, decay: Mapping, composed: Composed) -> Draft:
+    dimensions = decay["dimensions"]
+    window = decay["window"]
+    named = "; ".join(f"{dim} {v['winner']} at {_rate(v, v['winner']):.1%} against {_rate(v, v['control']):.1%} on {v['control']} (p = {v['p_value']:.4f})"
+                      for dim, v in sorted(dimensions.items()))
+    moved = 1 - HOLDBACK_SHARE
+    return Draft(
+        workflow_id=exp["workflow_id"], kind=ROLLBACK_KIND, composed=composed,
+        change_summary=f"Roll back to control: {named}, {window['from']} to {window['to']}.",
+        rationale=(f"Over the last {DECAY_WINDOW_DAYS} days a one-sided test at alpha {stats.DECAY_ALPHA} shows the promoted winner worse than "
+                   "its holdback. The holdback is a randomised comparison on the same days, so this is not a bad week."),
+        evidence={"experiment_id": exp["experiment_id"], "stage": "rollback", "signal_minute": decay["minute"], "window": window,
+                  "dimensions": dimensions},
+        # What going back recovers on the traffic it moves, so the share below is 1.
+        gain_lower_bound=sum(v["return_gain_lower_bound"] * moved for v in dimensions.values()), affected_share=1.0)
+
+
+def _rate(view: Mapping, option: str) -> float:
+    arm = view["arms"][option]
+    return arm["engaged"] / arm["connected"] if arm["connected"] else 0.0
+
+
+def _follow_rollback(store: Store, exp: sqlite3.Row, now: int) -> sqlite3.Row:
+    p = store.latest_proposal(exp["workflow_id"], ROLLBACK_KIND)
+    assert p is not None  # the move to rollback_requested is made after the Proposal exists
+    if p["status"] in IN_FLIGHT:
+        return exp
+    detail: dict[str, object] = {"proposal_id": p["proposal_id"]}
+    if p["status"] == APPLIED:
+        rolled = json.loads(p["body"])["evidence"]["dimensions"]
+        left = {d: held for d, held in json.loads(exp["holdbacks"]).items() if d not in rolled}
+        fields: dict[str, object] = {"holdbacks": json.dumps(left, sort_keys=True), "decay": None}
+        if left:
+            return _move(store, exp, PROMOTED, now, "rolled_back", {**detail, "version": p["applied_version"]}, **fields)
+        return _move(store, exp, ROLLED_BACK, now, "rolled_back", {**detail, "version": p["applied_version"]},
+                     end_minute=now, end_reason="decayed", **fields)
+    # Nobody said no to an expired or stale one, so the winner is judged again on fresh data at once.
+    # After a refusal the winner keeps its traffic, and tomorrow's look can raise it again.
+    again = {"last_look_day": None} if p["status"] in ASKED_AGAIN else {}
+    return _move(store, exp, PROMOTED, now, "rollback_not_applied",
+                 {**detail, "ended": p["status"], "reasons": json.loads(p["reasons"]) if p["reasons"] else []}, decay=None, **again)
+
+
+def _stop_watching_edited(store: Store, exp: sqlite3.Row, now: int) -> sqlite3.Row:
+    """A supervisor's change to a promoted dimension ends its comparison: their choice stands, and nothing is asked of it."""
+    held = json.loads(exp["holdbacks"])
+    changes = store.config_changes_after(exp["workflow_id"], exp["promote_version"])
+    edited = sorted({d for e in changes if e["actor"] == "supervisor" for d in e["changed_dims"]} & set(held))
+    if not edited:
+        return exp
+    left = {d: h for d, h in held.items() if d not in edited}
+    detail = {"why": f"a supervisor changed {', '.join(edited)}", "dimensions": edited}
+    fields: dict[str, object] = {"holdbacks": json.dumps(left, sort_keys=True)}
+    if not left:
+        return _move(store, exp, ABORTED, now, "aborted", detail, end_minute=now, end_reason="supervisor_edit", decay=None, **fields)
+    status = exp["status"]
+    if status == DECAYED:
+        decay = json.loads(exp["decay"])
+        decay["dimensions"] = {d: v for d, v in decay["dimensions"].items() if d in left}
+        status = DECAYED if decay["dimensions"] else PROMOTED
+        fields["decay"] = json.dumps(decay, sort_keys=True) if decay["dimensions"] else None
+    return _move(store, exp, status, now, "holdback_dropped", detail, **fields)
+
+
+def _follow_release(store: Store, exp: sqlite3.Row, now: int) -> sqlite3.Row:
+    p = store.applied_carrying(exp["workflow_id"], RELEASE_EVIDENCE, exp["experiment_id"])
+    if p is None:
+        return exp
+    return _move(store, exp, RELEASED, now, "released", {"proposal_id": p["proposal_id"], "version": p["applied_version"]},
+                 end_minute=now, end_reason="clean_holdback", holdbacks=None)
+
+
+def with_holdback_release(store: Store, workflow: Mapping, draft: Draft, now: int) -> Draft:
+    """Add a due holdback release to a Proposal that is going out anyway. The release is never asked for by itself."""
+    wf = workflow["workflow_id"]
+    exp = store.latest_experiment(wf)
+    if exp is None or exp["status"] != PROMOTED or now - exp["clean_since_minute"] < HOLDBACK_CLEAN_MINUTES or not draft.composed.changed_dims:
+        return draft  # a Proposal that changes nothing else would be the release on its own
+    held = json.loads(exp["holdbacks"])
+    composed = extend(draft.composed, *(set_distribution(d, {h["winner"]: 1.0}) for d, h in held.items()))
+    problems = violations(workflow, composed)
+    if problems:
+        store.note_decision(now, wf, KIND, "release_blocked", {"experiment_id": exp["experiment_id"], "violations": problems})
+        return draft
+    verdicts = json.loads(exp["verdicts"])
+    named = ", ".join(f"{d} {h['winner']}" for d, h in sorted(held.items()))
+    store.note_decision(now, wf, KIND, "release_batched", {"experiment_id": exp["experiment_id"], "carrier": draft.kind, "dimensions": sorted(held)})
+    return replace(
+        draft, composed=composed,
+        change_summary=f"{draft.change_summary} Also releases the {HOLDBACK_SHARE:.0%} holdback, moving all traffic to {named}.",
+        rationale=(f"{draft.rationale} {named} has gone {HOLDBACK_CLEAN_MINUTES // MINUTES_PER_DAY} days since "
+                   f"{label(exp['clean_since_minute'])} without a decay signal against its holdback, so the holdback goes in this Proposal."),
+        evidence={**draft.evidence, RELEASE_EVIDENCE: {"experiment_id": exp["experiment_id"], "holdback_share": HOLDBACK_SHARE, "dimensions": held,
+                                                       "clean_since": label(exp["clean_since_minute"])}},
+        # Each is scaled by its own share of traffic here, so the share below is 1.
+        gain_lower_bound=draft.gain_lower_bound * draft.affected_share + sum(verdicts[d]["gain_lower_bound"] * HOLDBACK_SHARE for d in held),
+        affected_share=1.0)
 
 
 # -- returning to control --------------------------------------------------------------------------

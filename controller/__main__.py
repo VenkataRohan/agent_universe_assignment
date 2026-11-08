@@ -197,6 +197,8 @@ def _experiment_line(e: dict) -> str:
     for d, v in sorted(e["verdicts"].items()):
         if "candidate" in v:
             line += f"; {d} {v['candidate']}: {v['status']}"
+    for d, h in sorted(e["holdbacks"].items()):
+        line += f"; {d} holdback on {h['control']}"
     return line
 
 

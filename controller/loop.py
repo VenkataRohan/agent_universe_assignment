@@ -64,7 +64,7 @@ class Controller:
         self._catch_up()
         analysis.bootstrap_from_history(self.store, workflows)
         self._workflows = workflows
-        self._governance = GovernanceClient(self.store, self.sim, workflows, self._overlays)
+        self._governance = GovernanceClient(self.store, self.sim, workflows, self._overlays, experiments.with_holdback_release)
         # A Proposal left half-done by an earlier life must not wait for the next tick.
         for w in workflows:
             self._guarded(w["workflow_id"], self._state["sim_minute"], self._governance.reconcile,

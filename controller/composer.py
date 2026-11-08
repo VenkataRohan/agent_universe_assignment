@@ -27,11 +27,16 @@ class Composed:
 
 def compose(current: Mapping, *intents: Intent) -> Composed:
     """`current`: the response of GET /workflows/{id}/config."""
-    proposed = copy.deepcopy(current["config"])
+    return extend(Composed(current["version"], current["config"], current["config"], {}, ()), *intents)
+
+
+def extend(composed: Composed, *intents: Intent) -> Composed:
+    """The same proposal with more intents on top, still measured against the config it started from."""
+    proposed = copy.deepcopy(composed.config)
     for intent in intents:
         intent(proposed)
-    diff = _diff(current["config"], proposed)
-    return Composed(current["version"], current["config"], proposed, diff, tuple(sorted(diff)))
+    diff = _diff(composed.base_config, proposed)
+    return Composed(composed.base_version, composed.base_config, proposed, diff, tuple(sorted(diff)))
 
 
 def move_off_caller_ids(degraded: Collection[str], unproven: Collection[str] = (), limit: float | None = None) -> Intent:

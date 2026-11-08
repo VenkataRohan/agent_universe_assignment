@@ -137,6 +137,9 @@ _Avoid_: Fatigue, drift (drift is a change in a KPI with no variant change)
 A Proposal that returns a decayed winner's traffic to control.
 _Avoid_: Revert (reserved for undoing a supervisor edit)
 
+**Holdback release**:
+Moving the holdback's traffic to the winner after 7 days without a decay signal. It only ever goes out inside another Proposal.
+
 ## Incidents
 
 **Incident**:

@@ -15,7 +15,7 @@ from __future__ import annotations
 import json
 import logging
 import sqlite3
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 
 from . import replay, stats
@@ -57,10 +57,13 @@ class Draft:
     incident: bool = False
 
 
+Batcher = Callable[[Store, Mapping, Draft, int], Draft]  # what else should go out with this Draft
+
+
 class GovernanceClient:
     def __init__(self, store: Store, sim: SimClient, workflows: list[dict],
-                 overlays: Mapping[str, Overlay] = OVERLAYS):
-        self._store, self._sim, self._overlays = store, sim, overlays
+                 overlays: Mapping[str, Overlay] = OVERLAYS, batcher: Batcher | None = None):
+        self._store, self._sim, self._overlays, self._batcher = store, sim, overlays, batcher
         self._workflows = {w["workflow_id"]: w for w in workflows}
 
     def _policy(self, workflow_id: str) -> EffectivePolicy:
@@ -111,7 +114,12 @@ class GovernanceClient:
 
     # -- proposing -----------------------------------------------------------------------------
     def propose(self, draft: Draft, now: int) -> str:
-        """Commit the Proposal, then send it to an approver. Returns its ID."""
+        """Commit the Proposal, then send it to an approver. Returns its ID.
+
+        Anything waiting to be batched goes with it, except on an incident fix, which must stand on its own.
+        """
+        if self._batcher is not None and not draft.incident:
+            draft = self._batcher(self._store, self._workflows[draft.workflow_id], draft, now)
         pid = self._record(draft, now, APPROVAL_ROUTE, SUBMITTING, now)
         self._send(self._store.proposal(pid), now)
         return pid
