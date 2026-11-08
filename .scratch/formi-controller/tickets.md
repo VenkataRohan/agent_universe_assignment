@@ -40,7 +40,7 @@ When a ticket is finished, set its `**Status:**` line to `done` and tick its row
 | # | Ticket | Blocked by | Done |
 |---|---|---|---|
 | 01 | Walking skeleton: loop, ingestion, restart | None | [x] |
-| 02 | Statistics module | None | [ ] |
+| 02 | Statistics module | None | [x] |
 | 03 | Cohorts and history baselines | 01 | [x] |
 | 04 | Governance client on the approval path, first used by degraded caller IDs | 01, 02, 03 | [x] |
 | 05 | Auto-apply path and caller-ID exploration | 04 | [x] |
@@ -50,10 +50,10 @@ When a ticket is finished, set its `**Status:**` line to `done` and tick its row
 | 09 | Decay rollback and holdback release | 08 | [ ] |
 | 10 | Per-cohort call time | 03, 05 | [x] |
 | 11 | Consolidated supervisor view | 06, 08, 10 | [x] |
-| 12 | Loop health and paging | 06 | [ ] |
-| 13 | Crash-recovery evidence | 04 | [ ] |
-| 14 | Load performance on public_03 | 09, 10, 12 | [ ] |
-| 15 | Grade reports, SUBMISSION.md and docs | 01–14 | [ ] |
+| 12 | Loop health and paging | 06 | [x] |
+| 13 | Crash-recovery evidence | 04 | [x] |
+| 14 | Load performance on public_03 | 09, 10, 12 | [x] |
+| 15 | Grade reports, SUBMISSION.md and docs | 01–14 | [x] |
 
 **What can I start now?** It's any ticket whose blockers are all `done`. Quick check from the repo root:
 

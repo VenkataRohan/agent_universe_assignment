@@ -16,10 +16,16 @@ Spec: user stories 77–79.
 
 **Blocked by:** 01–14
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] `reports/` holds public_01 and public_02 grade reports, the load report and the crash-test log
-- [ ] Every SUBMISSION.md template heading is filled; none deleted
-- [ ] Each of the six memos has accepted / declined / wrong-claim notes and a ≤120-word reply
-- [ ] SUBMISSION.md §10 contains a real audit query and its real output
-- [ ] A teammate can run, debug and extend from the README alone
+- [x] `reports/` holds public_01 and public_02 grade reports, the load report and the crash-test log
+- [x] Every SUBMISSION.md template heading is filled; none deleted
+- [x] Each of the six memos has accepted / declined / wrong-claim notes and a ≤120-word reply
+- [x] SUBMISSION.md §10 contains a real audit query and its real output
+- [x] A teammate can run, debug and extend from the README alone
+
+## Comments
+
+Grade reports were regenerated from HEAD and came out identical to the earlier runs. The crash test was re-run on HEAD. The load report stands: since it was measured, the controller has changed only in the read-only CLI.
+
+Two things left for the author: the hours-spent field at the top of `SUBMISSION.md`, and ticket 09's last box, which stays open because no public scenario reached a real rollback (`SUBMISSION.md` §13 says so).

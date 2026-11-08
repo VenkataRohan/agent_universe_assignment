@@ -176,3 +176,155 @@ thing you cut.
 - If something is ambiguous, **state your assumption in `SUBMISSION.md` and proceed**. Don't wait for an
   answer. Questions are welcome but won't block you.
 - Don't share the assignment or your solution publicly.
+
+---
+
+## 11. Running, debugging and extending the controller
+
+For whoever owns this when the author is away. Sections 1–10 above are the brief. The reasoning is in
+`SUBMISSION.md`, the design decisions in `docs/adr/`, and the vocabulary in `GLOSSARY.md`. Use the
+glossary's words: a *Proposal* and an *Approval* are different things.
+
+### Run it
+
+```bash
+python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
+
+# terminal 1: the simulator. --force wipes that run directory
+.venv/bin/python -m sim serve --scenario scenarios/public_02_incidents.yaml --run-dir runs/mine02 --force
+
+# terminal 2: the controller, until the scenario finishes (exit 0)
+./run.sh http://127.0.0.1:8700
+```
+
+`run.sh` writes to `state/controller.db`, or to `CONTROLLER_DB` if set. Logs go to stderr.
+
+Kill the controller at any point and run the same command: it resumes from the store. If the store
+belongs to another world (a different scenario, or a restarted simulator), `run.sh` moves it aside as
+`controller.db.stale-<timestamp>` and starts fresh. `python -m controller` without
+`--fresh-if-mismatch` refuses instead, with exit code 2.
+
+To grade a run, stop the simulator and compare against a no-op baseline. `baseline` has no `--force`,
+so give it a run directory that doesn't exist:
+
+```bash
+.venv/bin/python -m sim baseline --scenario scenarios/public_02_incidents.yaml --run-dir runs/base02
+.venv/bin/python -m sim grade --run runs/mine02 --baseline runs/base02 --out reports/public_02.md
+```
+
+Evidence scripts, which write to `reports/`:
+
+```bash
+.venv/bin/python scripts/crash_recovery.py          # 3 SIGKILLs on public_02, about 3 minutes
+.venv/bin/python scripts/measure_load.py            # public_03, instrumented, about 10 minutes
+.venv/bin/python scripts/measure_load.py --run-sh   # public_03 through the real ./run.sh
+```
+
+Tests and types:
+
+```bash
+.venv/bin/python -m pytest -q tests                 # everything; -m "not slow" skips full scenario runs
+.venv/bin/pip install mypy && .venv/bin/python -m mypy controller    # mypy isn't in requirements.txt
+```
+
+**Ground rules (breaking one is disqualifying).** Learn about the world only through the simulator's
+HTTP API. Controller code never imports `sim` or parses `scenarios/*.yaml`, and nobody modifies `sim/`.
+People and agents alike never read `runs/` (`sim grade` does that) or anything below
+`# ---- hidden ground truth` in a scenario file, and inside `sim/` read only `server.py` and
+`tests/test_sim.py`. Tests may run the simulator and shrink a public scenario's `days`, but never author
+or edit hidden-truth sections.
+
+### Ask it questions
+
+All of these only read the store, so they are safe while the loop runs. Run them with the virtualenv
+active (`source .venv/bin/activate`) or as `.venv/bin/python -m controller …`. Add `--db <path>` for a
+store other than `state/controller.db`.
+
+| Question | Command |
+|---|---|
+| Why did this workflow change at this time, who approved it, what happened next? | `python -m controller why ks_cancel --at "D3 17:00"` |
+| What did this lead hear, and what config was live? | `python -m controller heard ks_cancel:l00022549` |
+| What's being tested, what needs approval, what changed today, what did we decide not to do? | `python -m controller status ks_cancel` |
+| Partitions and baselines for every workflow | `python -m controller status` |
+| Is the loop healthy? | `python -m controller health` |
+| What was auto-applied this week, and why? | `python -m controller report --weekly` |
+
+### When something is wrong
+
+Start with `controller health`. Every decide step is recorded in the `decisions` table, including
+the decisions not to act.
+
+| You see | It means | Look at |
+|---|---|---|
+| `PAGE … Ingest is N ticks behind` | Chunks are failing. Nothing new is decided, reconciling continues, the next tick retries. | Log lines `ingest attempt`, then the simulator's `GET /events/chunks` |
+| `PAGE … credits left, below the reserve` | The next incident may not be able to validate a fix. | The credit burn in `health`, then `validated`/`suggested` decisions |
+| `PAGE … Incident … hours after it was detected` | A person has to approve a fix or change the prompt. | The `controller why` command in the page itself |
+| `PAGE … approval … lapsed` or `Proposals in a row … went stale` | An approved change isn't live, or a supervisor keeps moving the base. | `controller why`, then who is changing the config |
+| `error` notes, log line `decide step failed` | A programming error in one workflow's decide step. It doesn't page and repeats every tick. | The traceback in the log |
+| "refusing to resume" (exit 2) | The store is from another world. | Point `--db` at a new file |
+| Port 8700 in use | Another simulator is running. | `sim serve --port <n>`, then `./run.sh http://127.0.0.1:<n>` |
+| A change you expected didn't happen | Usually `held`: approver hours, the cap or a cooldown. | The `chose not to act` list in `controller status <workflow>` |
+
+Raw queries, for when the CLI doesn't answer it:
+
+```bash
+sqlite3 -readonly state/controller.db \
+  "SELECT minute, kind, outcome, proposal_id FROM decisions WHERE workflow_id='ks_cancel' ORDER BY decision_id DESC LIMIT 20"
+sqlite3 -readonly state/controller.db \
+  "SELECT minute, workflow_id, outcome, detail FROM decisions WHERE outcome IN ('error','ingest_failed','retried')"
+sqlite3 -readonly state/controller.db \
+  "SELECT proposal_id, status, reasons FROM proposals WHERE status <> 'applied'"
+```
+
+`minute` counts simulated minutes from D0 00:00, so 5010 is D3 11:30.
+
+### How the code is laid out
+
+One process, one thread, one 15-minute tick at a time. Each tick (`loop.py`): advance the clock → ingest
+every new chunk → for each workflow, reconcile Proposals, then hallucination, caller ID, experiments,
+call time, caller-ID exploration → re-judge the alerts.
+
+| Module | Owns |
+|---|---|
+| `simclient.py` | The only HTTP code. Retries, error classes, which calls are safe to repeat |
+| `store.py` | The SQLite schema, transactions and most of the SQL. `ingest.py` writes its own bulk inserts |
+| `ingest.py` | Chunk → one transaction (aggregates, exposures, leads, cursor) |
+| `registry.py` | A workflow's effective policy: API policy plus tenant overlay, which can only tighten |
+| `analysis.py`, `cohorts.py` | Baselines and the analysis partition, from history only |
+| `stats.py` | Every statistical test. Pure functions, no I/O, thresholds at the top of the file |
+| `composer.py` | Builds a proposed config on top of the current one, and checks it against policy |
+| `governance.py` | The Proposal state machine: sending, timing, reconciling, applying |
+| `replay.py` | A Proposal's dry run and affected leads |
+| `hallucination.py`, `callerid.py`, `experiments.py`, `schedule.py` | The four deciders. Each builds a `Draft` and hands it to governance |
+| `alerts.py` | The four page conditions |
+| `credits.py` | The only route to paid endpoints, so the reserve can't be bypassed |
+| `queries.py`, `__main__.py` | Read-only answers, and the CLI over them |
+
+### Extending it
+
+Rules that keep it safe, which every change must keep:
+
+1. **Commit before you act.** A state is written before the call it announces, and `submitting` or
+   `applying` is never acted on without first asking the platform which it was.
+2. **Every config change goes through `GovernanceClient`** (`propose` or `auto_apply`). Nothing else
+   calls `/approvals`, `/apply` or `PUT /config`.
+3. **Every decision is recorded,** including a decision not to act, in the same transaction as its
+   state change (`Store.record_decision`, or `store.note_decision` for a no-op).
+4. **A new statistical rule goes in `stats.py`,** with a test on synthetic counts and a simulated
+   false-positive rate if it can fire repeatedly.
+5. **An LLM may suggest. It never decides.**
+6. **Customer-facing dimensions are never auto-applied** (`CUSTOMER_FACING_DIMS`, ADR-0002).
+
+| To add | Do this |
+|---|---|
+| A tenant's preference | Add an `Overlay` to `OVERLAYS` in `registry.py`. It can only tighten a policy. Test it in `test_governance.py` |
+| A new detector or responder | A new module with a `respond(...)` that builds a `Draft`, called from `Controller._decide_workflow` in priority order. Incidents go first |
+| A dimension to experiment on | `DIMENSIONS_FOR_KPI` in `experiments.py`. Read ADR-0007 first |
+| A change to a test's threshold | The constant at the top of `stats.py`. Then re-run public_01/02 and read the `harmful` lines |
+| A new question for the CLI | A function in `queries.py`, a thin printer in `__main__.py`. Tests assert through the query, not the print |
+
+Tests go through one of two seams: the simulator's HTTP API (`tests/harness.py`; `Trouble` wraps the
+transport to inject a degraded number, an expiry or a kill, and `ScriptedWorld` answers the read API
+where no public scenario produces a case), or the pure functions in `stats.py`. Assert on what a user
+would see, never on private functions or internal tables. Record a decision that a future reader would
+otherwise question as a new file in `docs/adr/`.
