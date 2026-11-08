@@ -17,10 +17,10 @@ Spec: user stories 22–26, 31, 37, 45, 58; ADR-0006, ADR-0008.
 
 **Blocked by:** None (can start immediately)
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] Sample sizes match known reference values (e.g. ≈1,020 per arm for p=0.544, +10% relative, α 0.05 one-sided, power 0.8)
-- [ ] Each test accepts and rejects correctly on either side of its boundary
-- [ ] Over many simulated null experiments, each test's false-positive rate is at or below its stated α
-- [ ] Confirm-stage per-look α is 0.05/3 and the sample size reflects it
-- [ ] Identical inputs give identical outputs (no randomness)
+- [x] Sample sizes match known reference values (e.g. ≈1,020 per arm for p=0.544, +10% relative, α 0.05 one-sided, power 0.8)
+- [x] Each test accepts and rejects correctly on either side of its boundary
+- [x] Over many simulated null experiments, each test's false-positive rate is at or below its stated α
+- [x] Confirm-stage per-look α is 0.05/3 and the sample size reflects it
+- [x] Identical inputs give identical outputs (no randomness)
