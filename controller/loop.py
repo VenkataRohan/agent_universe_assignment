@@ -11,6 +11,7 @@ from pathlib import Path
 
 import httpx
 
+from . import analysis
 from .ingest import IngestError, Ingestor
 from .simclient import SimClient, SimError
 from .store import Store
@@ -47,12 +48,14 @@ class Controller:
         else:
             _check_same_world(run, st)
             d0 = date.fromisoformat(run["d0_date"])
-        campaign_days = {w["workflow_id"]: len(w["cadence"]) for w in self.sim.workflows()}
+        workflows = self.sim.workflows()
+        campaign_days = {w["workflow_id"]: len(w["cadence"]) for w in workflows}
         self._ingestor = Ingestor(self.store, d0, campaign_days)
         _, through = self.store.cursor()
         self._ingestor.warm(self._ingestor.day(_ts_at(d0, through)))
         self._state = st
         self._catch_up()
+        analysis.bootstrap_from_history(self.store, workflows)
 
     def step(self) -> bool:
         """Advance one tick and ingest what it produced. Returns True once the scenario is finished."""

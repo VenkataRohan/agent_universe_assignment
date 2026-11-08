@@ -10,14 +10,22 @@ Tables written by ingestion (ADR-0003):
                  variant and attempt band (1, 2, 3 = "3 or more"; for attempt-adjusted rates)
 - exposures      audit-only per-call log: what one lead heard, when, and under which config
 - world_events   verbatim config_changed / approval_decided / campaign_created events
+
+Written once per workflow, after history is in (see `analysis`):
+- workflow_analysis  the workflow's primary KPI, its partition's feature and its history baselines
+- cohorts            the cohorts of each workflow's analysis partition (`default` included)
+- cohort_hour_rates  per cohort and hour, the primary KPI from history, adjusted for attempt number
 """
 from __future__ import annotations
 
+import json
 import sqlite3
 import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
+
+from .cohorts import Cohort, Partition
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS run (
@@ -97,6 +105,33 @@ CREATE TABLE IF NOT EXISTS world_events (
     payload     TEXT NOT NULL      -- the event exactly as the simulator sent it
 );
 CREATE INDEX IF NOT EXISTS world_events_by_wf ON world_events (workflow_id, type, event_id);
+CREATE TABLE IF NOT EXISTS workflow_analysis (
+    workflow_id         TEXT PRIMARY KEY,
+    primary_kpi         TEXT    NOT NULL,
+    partition_feature   TEXT,               -- NULL: no feature splits this workflow's traffic
+    partition_spread    REAL,               -- highest group's KPI rate minus lowest group's
+    dials               INTEGER NOT NULL,   -- history totals, the baselines' numerators and denominators
+    connected           INTEGER NOT NULL,
+    engaged             INTEGER NOT NULL,
+    hallucination_flags INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS cohorts (
+    workflow_id TEXT    NOT NULL,
+    cohort_id   TEXT    NOT NULL,
+    position    INTEGER NOT NULL,
+    name        TEXT    NOT NULL,
+    where_json  TEXT    NOT NULL,
+    PRIMARY KEY (workflow_id, cohort_id)
+) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS cohort_hour_rates (
+    workflow_id   TEXT    NOT NULL,
+    cohort_id     TEXT    NOT NULL,
+    hour          INTEGER NOT NULL,
+    traffic        INTEGER NOT NULL,
+    successes     INTEGER NOT NULL,
+    adjusted_rate REAL    NOT NULL,
+    PRIMARY KEY (workflow_id, cohort_id, hour)
+) WITHOUT ROWID;
 """
 
 
@@ -113,6 +148,17 @@ def connect(path: str | Path, readonly: bool = False) -> sqlite3.Connection:
     conn.execute("PRAGMA busy_timeout=5000")
     conn.row_factory = sqlite3.Row
     return conn
+
+
+def load_partition(conn: sqlite3.Connection, workflow_id: str) -> Partition | None:
+    """A workflow's analysis partition, or None if it hasn't been chosen yet."""
+    r = conn.execute("SELECT partition_feature, partition_spread FROM workflow_analysis WHERE workflow_id = ?",
+                     (workflow_id,)).fetchone()
+    if r is None:
+        return None
+    cohorts = conn.execute("SELECT cohort_id, name, where_json FROM cohorts WHERE workflow_id = ? ORDER BY position",
+                           (workflow_id,)).fetchall()
+    return Partition(r[0], r[1], tuple(Cohort(c[0], c[1], json.loads(c[2])) for c in cohorts))
 
 
 class Store:
@@ -133,6 +179,36 @@ class Store:
 
     def close(self) -> None:
         self.conn.close()
+
+    @staticmethod
+    def history_call_counts(conn: sqlite3.Connection, workflow_id: str) -> list[sqlite3.Row]:
+        """Call counters from before D0, per feature cell, hour and attempt band."""
+        return conn.execute(
+            "SELECT lang, city_tier, age_band, value_band, a.hour hour, a.attempt_band band, SUM(a.dials) dials, "
+            "SUM(a.connected) connected, SUM(a.engaged) engaged, SUM(a.hallucination_flags) flags "
+            "FROM cell_agg a JOIN feature_cells USING (cell_id) "
+            "WHERE a.workflow_id = ? AND a.day < 0 GROUP BY a.cell_id, a.hour, a.attempt_band", (workflow_id,)).fetchall()
+
+    @staticmethod
+    def analysed_workflows(conn: sqlite3.Connection) -> set[str]:
+        return {r[0] for r in conn.execute("SELECT workflow_id FROM workflow_analysis")}
+
+    @staticmethod
+    def save_baselines(conn: sqlite3.Connection, workflow_id: str, primary_kpi: str, partition: Partition,
+                       dials: int, connected: int, engaged: int, flags: int) -> None:
+        conn.execute("INSERT INTO workflow_analysis VALUES (?,?,?,?,?,?,?,?)",
+                     (workflow_id, primary_kpi, partition.feature, partition.spread, dials, connected, engaged, flags))
+
+    @staticmethod
+    def save_cohorts(conn: sqlite3.Connection, workflow_id: str, partition: Partition) -> None:
+        conn.executemany("INSERT INTO cohorts VALUES (?,?,?,?,?)",
+                         [(workflow_id, c.id, i, c.name, json.dumps(c.where, sort_keys=True))
+                          for i, c in enumerate(partition.cohorts)])
+
+    @staticmethod
+    def save_hour_rates(conn: sqlite3.Connection, workflow_id: str, rates: list[tuple[str, int, int, int, float]]) -> None:
+        """`rates`: (cohort, hour, traffic, successes, adjusted rate)."""
+        conn.executemany("INSERT INTO cohort_hour_rates VALUES (?,?,?,?,?,?)", [(workflow_id, *r) for r in rates])
 
     # -- run identity and the chunk cursor (the `run` table is written only here) ---------------
     def run_identity(self) -> sqlite3.Row | None:

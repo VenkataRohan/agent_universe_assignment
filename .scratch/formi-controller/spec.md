@@ -184,6 +184,8 @@ It ships as `./run.sh <SIM_URL>`. It resumes cleanly after `kill -9`, and comes 
   - the governance boundary: no auto-apply on customer-facing dimensions; overlay timing and caps
   - supervisor-edit handling
   - query output
+
+  Where the real simulator can't produce a case (no public scenario has a feature group under 10% of traffic), a scripted world answers the same read API (`ScriptedWorld` in `tests/harness.py`). The controller's ingestion and queries still run for real, and expected values are worked by hand. It touches no scenario file.
 - **Incident behaviour** is tested by running **public_02** end to end, marked `slow`. Tests check that an incident is detected, that a validated fix is proposed with evidence, and that the fix is verified.
 - **Seam 2: the statistics module.** Pure-function tests with synthetic counts. They cover:
   - sample size matching known values

@@ -12,10 +12,10 @@ Spec: user stories 12–18; ADR-0004.
 
 **Blocked by:** 01
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] Analysis partition on each public_01 workflow is chosen deterministically and is identical across two runs
-- [ ] Partition cohorts are disjoint and, with default, cover every feature cell exactly once
-- [ ] A cohort's KPIs computed from cells equal those computed by recounting the exposure log for that cohort
-- [ ] Materialised config cohorts are accepted by the simulator and call events carry the same cohort IDs
-- [ ] `controller status` shows partition, cohort names and baselines per workflow
+- [x] Analysis partition on each public_01 workflow is chosen deterministically and is identical across two runs
+- [x] Partition cohorts are disjoint and, with default, cover every feature cell exactly once
+- [x] A cohort's KPIs computed from cells equal those computed by recounting the exposure log for that cohort
+- [x] Materialised config cohorts are accepted by the simulator and call events carry the same cohort IDs
+- [x] `controller status` shows partition, cohort names and baselines per workflow

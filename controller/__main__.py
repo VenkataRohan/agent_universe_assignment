@@ -2,6 +2,7 @@
 
     python -m controller --sim-url http://127.0.0.1:8700 --db state/controller.db     # run the loop
     python -m controller health --db state/controller.db                            # read-only
+    python -m controller status [workflow] --db state/controller.db                 # read-only
 """
 from __future__ import annotations
 
@@ -27,10 +28,15 @@ def main(argv: list[str] | None = None) -> int:
     sub = ap.add_subparsers(dest="cmd")
     h = sub.add_parser("health", help="cursor, events ingested and ingest lag")
     h.add_argument("--db", default=argparse.SUPPRESS)
+    st = sub.add_parser("status", help="each workflow's analysis partition and history baselines")
+    st.add_argument("workflow", nargs="?", help="just this workflow (default: all)")
+    st.add_argument("--db", default=argparse.SUPPRESS)
     a = ap.parse_args(argv)
 
     if a.cmd == "health":
         return _health(Path(a.db))
+    if a.cmd == "status":
+        return _status(Path(a.db), a.workflow)
     if not a.sim_url:
         ap.error("--sim-url is required to run the loop")
     return _run(a.sim_url, Path(a.db), a.fresh_if_mismatch)
@@ -82,6 +88,41 @@ def _health(db: Path) -> int:
     for k, v in rows:
         print(f"{k:<18}{v}")
     return 0
+
+
+def _status(db: Path, workflow: str | None) -> int:
+    if not db.exists():
+        print(f"controller: no store at {db}", file=sys.stderr)
+        return 1
+    workflows = queries.status(db, workflow)["workflows"]
+    if not workflows:
+        print(f"controller: no analysis yet{f' for workflow {workflow}' if workflow else ''}", file=sys.stderr)
+        return 1
+    for i, w in enumerate(workflows):
+        if i:
+            print()
+        _print_workflow_status(w)
+    return 0
+
+
+def _print_workflow_status(w: dict) -> None:
+    b, p = w["baselines"], w["partition"]
+    print(f"{w['workflow_id']}  (primary KPI: {w['primary_kpi']})")
+    print(f"  baselines   pickup {_pct(b['pickup_rate'])}   engagement {_pct(b['engagement_rate'])}   "
+          f"hallucination flags {_pct(b['hallucination_flag_rate'])} of connects   ({b['dials']:,} dials in history)")
+    if p["feature"] is None:
+        print("  partition   none: no feature splits this workflow's traffic")
+        return
+    print(f"  partition   by {p['feature'].replace('_', ' ')}: cohorts differ by {p['spread'] * 100:.1f} points "
+          f"on {w['primary_kpi']}")
+    for c in p["cohorts"]:
+        h = w["cohort_history"][c["id"]]
+        print(f"    {c['name']:<38}{c['id']:<28}{_pct(h['share']):>6} of traffic   "
+              f"{w['primary_kpi']} {_pct(h['primary_kpi_rate'])}")
+
+
+def _pct(rate: float | None) -> str:
+    return "n/a" if rate is None else f"{rate:.1%}"
 
 
 def _sim_time(minute: int) -> str:
