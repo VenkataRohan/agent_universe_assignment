@@ -13,11 +13,11 @@ Spec: user stories 37–44.
 
 **Blocked by:** 04
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] On public_02 (slow test), the bad-prompt incident is detected, a validated fix with evidence is proposed, approved, applied and verified
-- [ ] The fix summary names the supervisor edit it reverts
-- [ ] No incident is raised on public_01 (no incidents in that scenario)
-- [ ] LLM suggest is not called when a known-good prompt exists
-- [ ] Credits never drop below the reserve through non-incident spending
-- [ ] Time from onset to applied fix is recorded and shown in the audit
+- [x] On public_02 (slow test), the bad-prompt incident is detected, a validated fix with evidence is proposed, approved, applied and verified
+- [x] The fix summary names the supervisor edit it reverts
+- [x] No incident is raised on public_01 (no incidents in that scenario)
+- [x] LLM suggest is not called when a known-good prompt exists
+- [x] Credits never drop below the reserve through non-incident spending
+- [x] Time from onset to applied fix is recorded and shown in the audit

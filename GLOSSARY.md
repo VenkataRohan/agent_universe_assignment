@@ -158,6 +158,12 @@ _Avoid_: Alert (an alert is a message about the loop's own health)
 **Known-good prompt**:
 The prompt version a workflow ran most recently without an incident.
 
+**Onset**:
+When an incident's flag rate most likely began to rise. A prompt change in the day before detection is taken as the onset; otherwise it is estimated from the per-tick flag counts.
+
+**Escalated**:
+An incident the controller has handed to a person, because no candidate passed validation, credits ran out, or the applied fix did not bring the flag rate back down.
+
 **Degraded caller ID**:
 A caller ID whose pickup is significantly and materially below the workflow's other caller IDs over the same period.
 _Avoid_: Spam-flagged (that is a cause we can't observe)

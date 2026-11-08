@@ -10,6 +10,7 @@ Tables written by ingestion (ADR-0003):
                  variant and attempt band (1, 2, 3 = "3 or more"; for attempt-adjusted rates)
 - exposures      audit-only per-call log: what one lead heard, when, and under which config
 - world_events   verbatim config_changed / approval_decided / campaign_created events
+- flag_ticks     per workflow, 15-minute tick and prompt: connects and hallucination flags (ADR-0014)
 
 Written once per workflow, after history is in (see `analysis`):
 - workflow_analysis  the workflow's primary KPI, its partition's feature and its history baselines
@@ -20,6 +21,7 @@ Written by the governance client and the decide steps:
 - proposals  the controller's record of each config change it wants, committed before anything is sent
 - decisions  every decide step's outcome and inputs, including "did nothing"
 - experiments  each experiment's design and where its state machine has got to
+- incidents    each hallucination incident: what was seen, its candidates, its fix and how it ended
 """
 from __future__ import annotations
 
@@ -113,6 +115,14 @@ CREATE TABLE IF NOT EXISTS world_events (
     payload     TEXT NOT NULL      -- the event exactly as the simulator sent it
 );
 CREATE INDEX IF NOT EXISTS world_events_by_wf ON world_events (workflow_id, type, event_id);
+CREATE TABLE IF NOT EXISTS flag_ticks (
+    workflow_id    TEXT    NOT NULL,
+    minute         INTEGER NOT NULL,   -- the tick's first minute since D0
+    prompt_version TEXT    NOT NULL,
+    connects       INTEGER NOT NULL,
+    flags          INTEGER NOT NULL,
+    PRIMARY KEY (workflow_id, minute, prompt_version)
+) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS workflow_analysis (
     workflow_id         TEXT PRIMARY KEY,
     primary_kpi         TEXT    NOT NULL,
@@ -199,6 +209,25 @@ CREATE TABLE IF NOT EXISTS experiments (
     clean_since_minute INTEGER,        -- the promotion, or the latest decay signal: the holdback's clean days count from here
     UNIQUE (workflow_id, seq)
 );
+CREATE TABLE IF NOT EXISTS incidents (
+    incident_id     TEXT PRIMARY KEY,
+    workflow_id     TEXT    NOT NULL,
+    seq             INTEGER NOT NULL,
+    status          TEXT    NOT NULL,   -- open, verifying, verified, escalated or resolved
+    bad_prompt      TEXT    NOT NULL,
+    onset_minute    INTEGER NOT NULL,
+    detected_minute INTEGER NOT NULL,
+    detection       TEXT    NOT NULL,   -- JSON: the window and the test that raised it
+    cause           TEXT    NOT NULL,   -- JSON: the prompt change it followed, if any, and the known-good prompt
+    candidates      TEXT    NOT NULL DEFAULT '[]',  -- JSON list: each candidate, its source and validation
+    suggested       INTEGER NOT NULL DEFAULT 0,     -- 1: the LLM has been asked
+    fix_prompt      TEXT,
+    applied_minute  INTEGER,
+    applied_version INTEGER,
+    end_minute      INTEGER,
+    end_reason      TEXT,
+    UNIQUE (workflow_id, seq)
+);
 """
 
 
@@ -221,6 +250,14 @@ def experiment_view(r: sqlite3.Row) -> dict:
     """An experiment as the audit and the query interface show it."""
     documents = ("design", "candidates", "confirm_plan", "verdicts", "holdbacks", "decay")
     return {**{k: r[k] for k in r.keys() if k not in documents}, **{k: json.loads(r[k]) if r[k] else {} for k in documents}}
+
+
+def incident_view(r: sqlite3.Row) -> dict:
+    """An incident as the audit and the query interface show it."""
+    documents = ("detection", "cause", "candidates")
+    return {**{k: r[k] for k in r.keys() if k not in documents and k != "suggested"},
+            **{k: json.loads(r[k]) for k in documents},
+            "minutes_onset_to_applied": None if r["applied_minute"] is None else r["applied_minute"] - r["onset_minute"]}
 
 
 def load_partition(conn: sqlite3.Connection, workflow_id: str) -> Partition | None:
@@ -409,6 +446,60 @@ class Store:
             if event["actor"] == "supervisor" and dimension in event["changed_dims"]:
                 return minute_of(event["ts"], self.d0())
         return None
+
+    # -- hallucination incidents (written only here) ----------------------------------------------
+    def flag_ticks(self, workflow_id: str, first_minute: int, before_minute: int) -> list[sqlite3.Row]:
+        """Per tick and prompt, connects and flags of the ticks starting in [first_minute, before_minute), oldest first."""
+        return self.conn.execute("SELECT minute, prompt_version, connects, flags FROM flag_ticks "
+                                 "WHERE workflow_id = ? AND minute >= ? AND minute < ? ORDER BY minute, prompt_version",
+                                 (workflow_id, first_minute, before_minute)).fetchall()
+
+    def prompts_before(self, workflow_id: str, minute: int) -> list[str]:
+        """The prompts that took calls before this minute, most recently used first."""
+        return [r[0] for r in self.conn.execute(
+            "SELECT prompt_version FROM flag_ticks WHERE workflow_id = ? AND minute < ? "
+            "GROUP BY prompt_version ORDER BY MAX(minute) DESC", (workflow_id, minute))]
+
+    def baseline_flag_rate(self, workflow_id: str) -> float:
+        """Hallucination flags per connect in this workflow's history."""
+        r = self.conn.execute("SELECT hallucination_flags, connected FROM workflow_analysis WHERE workflow_id = ?",
+                              (workflow_id,)).fetchone()
+        return r[0] / r[1] if r is not None and r[1] else 0.0
+
+    @staticmethod
+    def next_incident_seq(conn: sqlite3.Connection, workflow_id: str) -> int:
+        return conn.execute("SELECT COALESCE(MAX(seq), 0) + 1 FROM incidents WHERE workflow_id = ?",
+                            (workflow_id,)).fetchone()[0]
+
+    @staticmethod
+    def insert_incident(conn: sqlite3.Connection, **row: Any) -> None:
+        conn.execute(f"INSERT INTO incidents ({', '.join(row)}) VALUES ({', '.join('?' * len(row))})",
+                     tuple(row.values()))
+
+    @staticmethod
+    def update_incident(conn: sqlite3.Connection, incident_id: str, **fields: Any) -> None:
+        conn.execute(f"UPDATE incidents SET {', '.join(f'{k} = ?' for k in fields)} WHERE incident_id = ?",
+                     (*fields.values(), incident_id))
+
+    def incident(self, incident_id: str) -> sqlite3.Row:
+        return self.conn.execute("SELECT * FROM incidents WHERE incident_id = ?", (incident_id,)).fetchone()
+
+    def live_incident(self, workflow_id: str) -> sqlite3.Row | None:
+        """The incident still being worked on, if any."""
+        return self.conn.execute("SELECT * FROM incidents WHERE workflow_id = ? AND status IN ('open', 'verifying') "
+                                 "ORDER BY seq DESC LIMIT 1", (workflow_id,)).fetchone()
+
+    def prompts_with_incidents(self, workflow_id: str) -> set[str]:
+        """Prompts an incident was raised on, and fixes that failed to bring the flag rate down."""
+        rows = self.conn.execute("SELECT bad_prompt, end_reason, fix_prompt FROM incidents WHERE workflow_id = ?",
+                                 (workflow_id,)).fetchall()
+        return {r["bad_prompt"] for r in rows} | {r["fix_prompt"] for r in rows if r["end_reason"] == "not_recovered"}
+
+    def escalated_on(self, workflow_id: str, prompt: str) -> bool:
+        """Was an incident on this prompt, or a fix to it, handed to a human?"""
+        return self.conn.execute("SELECT 1 FROM incidents WHERE workflow_id = ?1 AND status = 'escalated' "
+                                 "AND (bad_prompt = ?2 AND fix_prompt IS NULL OR fix_prompt = ?2)",
+                                 (workflow_id, prompt)).fetchone() is not None
 
     # -- experiments (written only here) ---------------------------------------------------------
     @staticmethod

@@ -56,6 +56,7 @@ class Draft:
     affected_share: float    # the share of the workflow's traffic this moves
     incident: bool = False
     dry_run: dict | None = None  # for a change the allocation replay can't see; otherwise that replay is used
+    names_supervisor_edit: bool = False  # the summary already says which supervisor edit this undoes
 
 
 Batcher = Callable[[Store, Mapping, Draft, int], Draft]  # what else should go out with this Draft
@@ -67,8 +68,8 @@ class GovernanceClient:
         self._store, self._sim, self._overlays, self._batcher = store, sim, overlays, batcher
         self._workflows = {w["workflow_id"]: w for w in workflows}
 
-    def _policy(self, workflow_id: str) -> EffectivePolicy:
-        return effective_policy(self._workflows[workflow_id], self._overlays)
+    def _policy(self, workflow_id: str, overlay: bool = True) -> EffectivePolicy:
+        return effective_policy(self._workflows[workflow_id], self._overlays if overlay else {})
 
     def max_shift(self, workflow_id: str) -> float:
         return self._policy(workflow_id).max_shift
@@ -93,18 +94,19 @@ class GovernanceClient:
         return None
 
     # -- may we ask? ---------------------------------------------------------------------------
-    def hold_reason(self, workflow_id: str, kind: str, now: int, incident: bool = False, auto: bool = False) -> str | None:
+    def hold_reason(self, workflow_id: str, kind: str, now: int, incident: bool = False, auto: bool = False,
+                    policy_limits_only: bool = False) -> str | None:
         """Why a new Proposal can't go out at this minute, or None if it can.
 
         Incident fixes wait only for their own kind. An auto-apply asks no approver, so the approver's hours,
-        request cap and cooldown don't apply to it.
+        request cap and cooldown don't apply to it. `policy_limits_only` sets the tenant's preference overlay aside.
         """
         in_flight = self._store.open_proposals(workflow_id, IN_FLIGHT)
         if any(p["kind"] == kind for p in in_flight) if incident else in_flight:
             return "a Proposal is already in flight on this workflow"
         if auto:
             return None
-        policy = self._policy(workflow_id)
+        policy = self._policy(workflow_id, overlay=not policy_limits_only)
         if not policy.may_request_at(now):
             return (f"outside request hours ({policy.approver_start_hour}:00 to "
                     f"{policy.approver_end_hour}:00, less the last 2 hours)")
@@ -142,7 +144,7 @@ class GovernanceClient:
         affected_leads = replay.affected_leads(self._store, workflow, composed, now)
         dry_run = draft.dry_run or replay.dry_run(self._store, workflow, composed, now)
         impact = stats.impact_score(draft.gain_lower_bound, draft.affected_share, draft.incident)
-        note = self._supervisor_edit_note(wf, composed)
+        note = "" if draft.names_supervisor_edit else self._supervisor_edit_note(wf, composed)
         rationale = f"{draft.rationale} {note}" if note else draft.rationale
         change_summary = (INCIDENT_LABEL if draft.incident else "") + (f"{draft.change_summary} {note}" if note else draft.change_summary)
         with self._store.transaction() as conn:

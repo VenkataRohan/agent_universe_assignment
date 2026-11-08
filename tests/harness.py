@@ -151,6 +151,8 @@ class Trouble(httpx.BaseTransport):
       cohort's best hours are known by construction. With `degrade_history`, history follows the same rules.
     - `no_experiments`: the controller is shown no spare welcome messages or voices, so it has nothing to
       experiment on and a test about something else keeps its traffic and its one in-flight Proposal.
+    - `hallucinate`: workflow -> {prompt: fraction}: answered calls on that prompt are QA-flagged at exactly that rate
+      (live calls only). `requests` counts every request by path, so a test can say an endpoint was never called.
     - `approval_only`: the controller is shown policies without auto-apply and no spare caller IDs,
       welcome messages or voices, so every change takes the approval path and nothing but the test's
       own trouble is in play.
@@ -179,6 +181,8 @@ class Trouble(httpx.BaseTransport):
         self.primary: dict[str, str] = {}
         self.hour_shaped: dict[str, list[tuple[str, Callable[[dict[str, str], int], float]]]] = {}
         self.no_experiments = False
+        self.hallucinate: dict[str, dict[str, float]] = {}
+        self.requests: Counter[str] = Counter()
         self._seen = 0
         self._lifted = self._dampened = 0
 
@@ -196,6 +200,7 @@ class Trouble(httpx.BaseTransport):
 
     def handle_request(self, request: httpx.Request) -> httpx.Response:
         method, path = request.method, request.url.path
+        self.requests[path] += 1
         request = self._rewrite_request(request)
         if self._refuse is not None and method == self._refuse[0] and path.endswith(self._refuse[1]):
             status, code = self._refuse[2:]
@@ -282,8 +287,14 @@ class Trouble(httpx.BaseTransport):
                 return {**ev, "connected": False, "engaged": False, "disposition": "no_answer", "duration_s": 0,
                         "turns": 0, "qa": None}
         if ev["type"] == "call":
-            return self._shape_by_hour(self._harm(self._set_engagement(self._dull_engagement(self._mute(self._steady_pickup(self._reshape_pickup(ev)))))))
+            return self._flag(self._shape_by_hour(self._harm(self._set_engagement(self._dull_engagement(self._mute(self._steady_pickup(self._reshape_pickup(ev))))))))
         return ev
+
+    def _flag(self, ev: dict) -> dict:
+        rate = self.hallucinate.get(ev["workflow_id"], {}).get(ev["variant"]["prompt_version"])
+        if rate is None or not ev["connected"]:
+            return ev
+        return {**ev, "qa": {**ev["qa"], "hallucination_flag": ev["event_id"] % 100 < rate * 100}}
 
     # Decided from the event ID, or remembered by it: the test oracle reads the same chunks again and must see the same calls.
     def _shape_by_hour(self, ev: dict) -> dict:

@@ -1,7 +1,7 @@
 """Loop: one process, one thread, one 15-minute tick at a time.
 
 Each tick: advance the simulated clock -> ingest every chunk after the cursor -> for each workflow,
-reconcile its Proposals (applying any approval), run the caller-ID check, then experiments, then
+reconcile its Proposals (applying any approval), respond to hallucination incidents, run the caller-ID check, then experiments, then
 call-time tuning, then caller-ID exploration. Later tickets add more detection and decisions to `_decide`.
 """
 from __future__ import annotations
@@ -13,7 +13,8 @@ from pathlib import Path
 
 import httpx
 
-from . import analysis, callerid, experiments, schedule
+from . import analysis, callerid, experiments, hallucination, schedule
+from .credits import Credits
 from .governance import GovernanceClient
 from .ingest import IngestError, Ingestor
 from .registry import OVERLAYS, Overlay
@@ -31,6 +32,7 @@ class ResumeRefused(Exception):
 class Controller:
     def __init__(self, http: httpx.Client, db_path: str | Path, overlays: Mapping[str, Overlay] = OVERLAYS):
         self.sim = SimClient(http)
+        self._credits = Credits(self.sim)
         self.store = Store(db_path)
         self._overlays = overlays
         self._ingestor: Ingestor | None = None
@@ -100,6 +102,7 @@ class Controller:
         assert self._governance is not None
         self._governance.reconcile(workflow["workflow_id"], now)
         # Incidents first, then the dimensions that can move the primary KPI, then exploration (ADR-0007).
+        hallucination.respond(self.store, self.sim, self._credits, self._governance, workflow, now)
         flagged = callerid.check_degraded(self.store, self.sim, self._governance, workflow, now)
         experiments.respond(self.store, self.sim, self._governance, workflow, now)
         schedule.respond(self.store, self.sim, self._governance, workflow, now)

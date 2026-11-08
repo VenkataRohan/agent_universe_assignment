@@ -1,7 +1,7 @@
 """Ingestor: one event chunk -> one transaction.
 
 Each chunk writes the lead map, the feature-cell aggregates, the audit-only exposure log, the
-verbatim world events and the cursor together, so a crash mid-chunk leaves no trace and the
+per-tick flag counters, the verbatim world events and the cursor together, so a crash mid-chunk leaves no trace and the
 chunk is simply ingested again (ADR-0003). History and live chunks take the same path.
 
 Only active campaigns' leads are cached in memory. A campaign is active until its cadence runs
@@ -16,8 +16,10 @@ from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import date
 
+from .simtime import MINUTES_PER_DAY
 from .store import Store
 
+TICK_MINUTES = 15
 FLUSH_ROWS = 20_000
 WORLD_EVENT_TYPES = frozenset({"config_changed", "approval_decided", "campaign_created"})
 
@@ -124,6 +126,7 @@ class Ingestor:
         # cell_agg key -> counters, in cell_agg column order: dials, connected, engaged, interested,
         # hallucination_flags, flow_adherence_sum, duration_s_sum
         agg: dict[tuple, list] = {}
+        flag_ticks: dict[tuple[str, int, str], list[int]] = {}  # (workflow, tick's first minute, prompt) -> connects, flags
         leads: list[tuple] = []
         exposures: list[tuple] = []
         world: list[tuple] = []
@@ -179,6 +182,10 @@ class Ingestor:
                     c[1] += 1
                     c[4] += flag or 0
                     c[5] += qa["flow_adherence"] if qa else 0.0
+                    minute = key[1] * MINUTES_PER_DAY + key[2] * 60 + int(ts[14:16])
+                    tick = flag_ticks.setdefault((ev["workflow_id"], minute - minute % TICK_MINUTES, v["prompt_version"]), [0, 0])
+                    tick[0] += 1
+                    tick[1] += flag or 0
                 if ev["engaged"]:
                     c[2] += 1
                 if ev["disposition"] == "concluded_interested":
@@ -225,5 +232,8 @@ class Ingestor:
             "flow_adherence_sum = flow_adherence_sum + excluded.flow_adherence_sum, "
             "duration_s_sum = duration_s_sum + excluded.duration_s_sum",
             [(*k, *c) for k, c in agg.items()])
+        conn.executemany("INSERT INTO flag_ticks VALUES (?,?,?,?,?) ON CONFLICT DO UPDATE SET "
+                         "connects = connects + excluded.connects, flags = flags + excluded.flags",
+                         [(*k, *c) for k, c in flag_ticks.items()])
         Store.advance_cursor(conn, meta["chunk"], meta["until_minute"], n, meta["last_event_id"] if n else 0)
         return n

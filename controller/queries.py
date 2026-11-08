@@ -15,7 +15,7 @@ from pathlib import Path
 from . import simtime
 from .cohorts import FEATURES, KPI_COUNTERS, Partition
 from .composer import describe_change
-from .store import connect, experiment_view, load_partition
+from .store import connect, experiment_view, incident_view, load_partition
 
 
 def daily_kpis(db: str | Path) -> list[dict]:
@@ -249,6 +249,16 @@ def experiments(db: str | Path, workflow_id: str) -> list[dict]:
         conn.close()
 
 
+def incidents(db: str | Path, workflow_id: str) -> list[dict]:
+    """This workflow's hallucination incidents, oldest first: what was seen, its fix and how it ended."""
+    conn = connect(db, readonly=True)
+    try:
+        return [incident_view(r) for r in conn.execute("SELECT * FROM incidents WHERE workflow_id = ? ORDER BY seq",
+                                                       (workflow_id,))]
+    finally:
+        conn.close()
+
+
 # -- why and heard: every answer comes from the store ----------------------------------------------
 _INITIAL_CHANGE = {"version": 1, "actor": "business_default", "applied_at": None, "changed_dims": [],
                    "proposal_id": None, "approval_id": None}
@@ -300,10 +310,18 @@ def why(db: str | Path, workflow_id: str, at_minute: int) -> dict:
             "approval": _approval_decision(conn, workflow_id, in_force["approval_id"]),
             "aftermath": _aftermath(conn, workflow_id, in_force["version"], changes),
             "experiment": _experiment_at(conn, workflow_id, at_minute),
+            "incident": _incident_behind(conn, proposal),
             "decisions": _decisions_behind(conn, workflow_id, at_minute, in_force["proposal_id"], since),
         }
     finally:
         conn.close()
+
+
+def _incident_behind(conn: sqlite3.Connection, proposal: dict | None) -> dict | None:
+    """The incident this Proposal was the fix for, if it was one."""
+    incident_id = None if proposal is None else proposal["evidence"].get("incident_id")
+    row = None if incident_id is None else conn.execute("SELECT * FROM incidents WHERE incident_id = ?", (incident_id,)).fetchone()
+    return None if row is None else incident_view(row)
 
 
 def _experiment_at(conn: sqlite3.Connection, workflow_id: str, at_minute: int) -> dict | None:

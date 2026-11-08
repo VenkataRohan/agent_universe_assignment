@@ -428,3 +428,36 @@ def test_a_schedule_has_not_dropped_on_a_gap_within_noise_or_a_rise():
 
     assert not within_noise.holds and within_noise.p_value == pytest.approx(0.184, abs=1e-3)
     assert not rise.holds
+
+
+# -- after a hallucination fix ----------------------------------------------------------------------
+# Worked by hand: Binomial(300, 0.015), P(X >= 8) = 0.0850 and P(X >= 9) = 0.0390.
+def test_flag_rate_counts_as_recovered_only_while_it_is_not_significantly_above_baseline():
+    assert stats.flag_rate_recovered(stats.Counts(8, 300), 0.015).holds
+    assert not stats.flag_rate_recovered(stats.Counts(9, 300), 0.015).holds
+
+
+def test_flag_rate_cannot_recover_on_fewer_than_300_connects():
+    assert not stats.flag_rate_recovered(stats.Counts(0, 299), 0.015).holds
+    assert stats.flag_rate_recovered(stats.Counts(0, 300), 0.015).holds
+
+
+def test_flag_rate_still_at_twice_baseline_has_not_recovered_even_when_300_connects_cannot_prove_it():
+    # Binomial(300, 0.01): P(X >= 6) is about 0.08, so the significance test alone would pass this.
+    assert not stats.flag_rate_recovered(stats.Counts(6, 300), 0.01).holds
+    assert stats.flag_rate_recovered(stats.Counts(5, 300), 0.01).holds
+
+
+# -- when a spike began -----------------------------------------------------------------------------
+def test_onset_is_the_tick_where_the_elevated_run_begins():
+    quiet, loud = stats.Counts(0, 20), stats.Counts(4, 20)
+    assert stats.spike_onset([quiet] * 6 + [loud] * 5, 0.015) == 6
+
+
+def test_onset_is_the_first_tick_when_every_tick_is_elevated():
+    assert stats.spike_onset([stats.Counts(4, 20)] * 5, 0.015) == 0
+
+
+def test_onset_ignores_one_stray_flag_before_the_run():
+    run = [stats.Counts(0, 20), stats.Counts(1, 20), stats.Counts(0, 20), stats.Counts(0, 20), stats.Counts(4, 20), stats.Counts(5, 20), stats.Counts(4, 20)]
+    assert stats.spike_onset(run, 0.015) == 4

@@ -177,11 +177,22 @@ def _why(db: Path, workflow: str, at: str) -> int:
     print(f"              next change: {'none' if n is None else 'version ' + str(n['version']) + ' by ' + n['actor'] + ' at ' + n['applied_at']}")
     if w["experiment"] is not None:
         print(f"  experiment  {_experiment_line(w['experiment'])}")
+    if w["incident"] is not None:
+        print(f"  incident    {_incident_line(w['incident'])}")
     print("  decisions")
     for d in w["decisions"]:
         print(f"    {simtime.label(d['minute'])}  {d['kind']:<10}{d['outcome']:<22}{d['proposal_id'] or ''}"
               f"{_decision_reason(d['detail'])}")
     return 0
+
+
+def _incident_line(i: dict) -> str:
+    line = (f"{i['incident_id']}: {i['status']}; {i['bad_prompt']} flagged from {simtime.label(i['onset_minute'])}, "
+            f"detected {simtime.label(i['detected_minute'])}")
+    if i["applied_minute"] is not None:
+        line += (f"; fix {i['fix_prompt']} applied {simtime.label(i['applied_minute'])}, "
+                 f"{i['minutes_onset_to_applied']} minutes after onset")
+    return line + (f"; ended {simtime.label(i['end_minute'])}: {i['end_reason']}" if i["end_minute"] is not None else "")
 
 
 def _experiment_line(e: dict) -> str:

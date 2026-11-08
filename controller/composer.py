@@ -89,6 +89,12 @@ def set_distribution(dim: str, distribution: Mapping[str, float]) -> Intent:
     return intent
 
 
+def set_prompt(prompt_version: str) -> Intent:
+    def intent(config: dict) -> None:
+        config["prompt_version"] = prompt_version
+    return intent
+
+
 def write_cohorts(cohorts: Collection[Mapping]) -> Intent:
     """Add these cohorts to the config unless it already has them."""
     def intent(config: dict) -> None:

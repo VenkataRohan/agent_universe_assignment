@@ -25,6 +25,10 @@ class SimError(Exception):
         """It may succeed if tried again: a server error, or the request may never have arrived."""
         return self.status == 0 or self.status >= 500
 
+    @property
+    def out_of_credits(self) -> bool:
+        return self.status == 402
+
 
 class SimClient:
     def __init__(self, http: httpx.Client, retries: int = 5, backoff_s: float = 0.5,
@@ -77,6 +81,15 @@ class SimClient:
     def auto_apply(self, workflow_id: str, body: dict) -> dict:
         """One attempt only, for the same reason as `apply_approval`."""
         return self._once("PUT", f"/workflows/{workflow_id}/config", body)
+
+    # -- what costs credits: only `credits.Credits` calls these, so the reserve can't be bypassed --
+    def suggest_fixes(self, workflow_id: str, problem: str) -> dict:
+        """One attempt only: a retry after a lost response would pay twice."""
+        return self._once("POST", "/llm/suggest-fixes", {"workflow_id": workflow_id, "problem": problem})
+
+    def validate_prompt(self, workflow_id: str, prompt_version: str, n: int) -> dict:
+        """One attempt only, for the same reason as `suggest_fixes`."""
+        return self._once("POST", "/validation/runs", {"workflow_id": workflow_id, "prompt_version": prompt_version, "n": n})
 
     # -- time ----------------------------------------------------------------------------------
     def advance_to(self, target_minute: int) -> dict:

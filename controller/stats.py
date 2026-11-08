@@ -25,6 +25,8 @@ HALLUCINATION_ALPHA = 0.001
 HALLUCINATION_MIN_CONNECTS = 150
 HALLUCINATION_MIN_RATIO = 2
 MIN_BASELINE_FLAG_RATE = 0.001  # a workflow with no flags in history must not page on its first one
+HALLUCINATION_VERIFY_CONNECTS = 300
+HALLUCINATION_RECOVERY_ALPHA = 0.05  # below this, the flag rate is still above baseline (ADR-0014)
 
 CALLER_ID_ALPHA = 0.001
 CALLER_ID_MIN_DIALS = 300
@@ -254,6 +256,41 @@ def hallucination_spike(window: Counts, baseline_rate: float) -> Verdict:
     return Verdict(window.trials >= HALLUCINATION_MIN_CONNECTS
                    and window.successes >= HALLUCINATION_MIN_RATIO * baseline * window.trials
                    and p < HALLUCINATION_ALPHA, p)
+
+
+def flag_rate_recovered(window: Counts, baseline_rate: float) -> Verdict:
+    """After a fix: enough connects, below the level that raises an incident, and not significantly above baseline."""
+    baseline = max(baseline_rate, MIN_BASELINE_FLAG_RATE)
+    p = _binomial_p_at_least(window.successes, window.trials, baseline)
+    return Verdict(window.trials >= HALLUCINATION_VERIFY_CONNECTS
+                   and window.successes < HALLUCINATION_MIN_RATIO * baseline * window.trials
+                   and p >= HALLUCINATION_RECOVERY_ALPHA, p)
+
+
+def spike_onset(ticks: Sequence[Counts], baseline_rate: float) -> int:
+    """The index of the tick a spike most likely began: the start of the run that least looks like baseline.
+
+    Each candidate start is scored by the binomial log-likelihood ratio of everything from it onward against
+    baseline. `ticks`: flags out of connects, oldest first, leaving out ticks with no connects. Ties go to the
+    later start, so an onset is never put earlier than the evidence requires.
+    """
+    baseline = max(baseline_rate, MIN_BASELINE_FLAG_RATE)
+    onset, best, flags, connects = 0, -1.0, 0, 0
+    for i in range(len(ticks) - 1, -1, -1):
+        flags, connects = flags + ticks[i].successes, connects + ticks[i].trials
+        score = _log_likelihood_ratio(flags, connects, baseline)
+        if score > best:
+            onset, best = i, score
+    return onset
+
+
+def _log_likelihood_ratio(flags: int, connects: int, baseline: float) -> float:
+    """How much better an elevated rate explains these counts than baseline does. 0 if they aren't elevated."""
+    if not connects or flags / connects <= baseline:
+        return 0.0
+    rate = flags / connects
+    missed = (connects - flags) * math.log((1 - rate) / (1 - baseline)) if flags < connects else 0.0
+    return flags * math.log(rate / baseline) + missed
 
 
 def caller_id_degraded(caller: Counts, others: Counts) -> Verdict:

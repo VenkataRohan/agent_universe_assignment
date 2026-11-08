@@ -41,6 +41,8 @@ def _calls_by(rows: Iterable[sqlite3.Row], dim: str) -> dict[str, Calls]:
 def affected_leads(store: Store, workflow: Mapping, composed: Composed, now: int) -> int:
     """Leads this change will reach: active campaigns of affected cohorts (unless locked) plus tomorrow's."""
     first_active_day = now // MINUTES_PER_DAY - len(workflow["cadence"]) + 1
+    if composed.base_config["prompt_version"] != composed.config["prompt_version"]:  # one prompt for every call, live at once
+        return sum(r["leads"] for r in store.active_leads_by_cell(workflow["workflow_id"], first_active_day)) + workflow["daily_batch"]["size"]
     total = affected = hours_affected = 0
     for r in store.active_leads_by_cell(workflow["workflow_id"], first_active_day):
         total += r["leads"]
