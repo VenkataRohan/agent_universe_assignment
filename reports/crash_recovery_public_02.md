@@ -1,15 +1,15 @@
 # Crash-recovery log — public_02_incidents
 
-Run 2026-11-09 02:35, seed 15. The controller (`./run.sh`) was SIGKILLed at random points and restarted with the same command; each restart resumed from the store. An uninterrupted run took 55 s.
+Run 2026-11-09 03:01, seed 15. The controller (`./run.sh`) was SIGKILLed at random points and restarted with the same command; each restart resumed from the store. An uninterrupted run took 54 s.
 
 ## Kills and restarts
 
 | life | started | killed at | after (s) | simulated minute | in flight at the kill | restarted at | exit |
 |---|---|---|---|---|---|---|---|
-| 1 | 02:34:23 | 02:34:29 | 6.1 | 870 | 1 pending | 02:34:29 | SIGKILL |
-| 2 | 02:34:29 | 02:35:01 | 38.2 | 10185 | none | 02:35:01 | SIGKILL |
-| 3 | 02:35:01 | 02:35:11 | 48.4 | 12645 | none | 02:35:11 | SIGKILL |
-| 4 | 02:35:11 | — | — | — | — | — | 0 |
+| 1 | 03:00:38 | 03:00:44 | 5.9 | 810 | 3 pending | 03:00:44 | SIGKILL |
+| 2 | 03:00:44 | 03:01:15 | 37.2 | 9855 | none | 03:01:15 | SIGKILL |
+| 3 | 03:01:15 | 03:01:25 | 47.0 | 12510 | none | 03:01:25 | SIGKILL |
+| 4 | 03:01:25 | — | — | — | — | — | 0 |
 
 ## Checks
 
@@ -21,5 +21,5 @@ Run 2026-11-09 02:35, seed 15. The controller (`./run.sh`) was SIGKILLed at rand
 | no pending Proposal lost | PASS |
 | grade within noise of the uninterrupted run | PASS |
 
-Platform at the end: 18 approvals, 26 config versions; store: 24 Proposals (21 applied, 3 rejected).
-Conclusion rate (ALL): 0.417 after the kills, 0.417 uninterrupted; tolerance 0.03.
+Platform at the end: 18 approvals, 24 config versions; store: 23 Proposals (19 applied, 1 pending, 2 rejected, 1 stale).
+Conclusion rate (ALL): 0.416 after the kills, 0.416 uninterrupted; tolerance 0.03.

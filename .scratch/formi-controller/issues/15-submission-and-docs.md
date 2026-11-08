@@ -26,6 +26,6 @@ Spec: user stories 77–79.
 
 ## Comments
 
-Grade reports were regenerated from HEAD and came out identical to the earlier runs. The crash test was re-run on HEAD. The load report stands: since it was measured, the controller has changed only in the read-only CLI.
+After the 24-hour block on auto-apply following a rejection (ADR-0009), the grade reports, the crash test and the load report were all re-run. public_01 came out identical. public_02 changed, because once one config differs the simulated world diverges.
 
 Two things left for the author: the hours-spent field at the top of `SUBMISSION.md`, and ticket 09's last box, which stays open because no public scenario reached a real rollback (`SUBMISSION.md` §13 says so).

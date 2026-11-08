@@ -25,26 +25,26 @@ The wall-clock figure should be re-taken on the real envelope before it is quote
 | | Value |
 |---|---|
 | Events ingested live (5 days) | 4,200,164 |
-| Ingest throughput | ~42,000 events/s (99 s of ingest for 4.2 M events) |
-| Startup (7-day history catch-up + bootstrap) | 64 s, once |
-| Decision lag per tick | p50 0.81 s, p95 1.64 s, max 7.3 s (tick = 15 simulated minutes) |
-| `./run.sh` end to end | exit 0, 546 s for 5 days, startup included |
-| Peak RSS, controller | 450 MB (instrumented), 226 MB (`ps` sampled, `./run.sh`) |
-| Peak RSS, simulator | 709–772 MB |
+| Ingest throughput | ~43,600 events/s (96 s of ingest for 4.2 M events) |
+| Startup (7-day history catch-up + bootstrap) | 60 s, once |
+| Decision lag per tick | p50 0.78 s, p95 1.58 s, max 7.4 s (tick = 15 simulated minutes) |
+| `./run.sh` end to end | exit 0, 535 s for 5 days, startup included |
+| Peak RSS, controller | 418 MB (instrumented), 221 MB (`ps` sampled, `./run.sh`) |
+| Peak RSS, simulator | 757–830 MB |
 
 Controller wall-clock per simulated day (instrumented; budget 600 s):
 
 | Day | Controller s | of which ingest | of which decide | Simulator advance s |
 |---|---|---|---|---|
-| D0 | 75.8 | 20.5 | 55.3 | 7.1 |
-| D1 | 78.1 | 16.4 | 61.7 | 7.2 |
-| D2 | 105.0 | 20.6 | 84.4 | 7.2 |
-| D3 | 94.5 | 21.0 | 73.4 | 7.3 |
-| D4 | 102.4 | 21.0 | 81.4 | 7.5 |
+| D0 | 73.2 | 19.1 | 54.0 | 7.0 |
+| D1 | 75.7 | 16.0 | 59.7 | 7.0 |
+| D2 | 103.2 | 20.6 | 82.6 | 7.1 |
+| D3 | 91.7 | 20.4 | 71.3 | 7.1 |
+| D4 | 99.2 | 20.2 | 79.0 | 7.2 |
 
-`./run.sh` per day, simulator included: 143 s (D0, with the 64 s startup), 87, 109, 100, 107 s.
+`./run.sh` per day, simulator included: 139 s (D0, with the startup), 86, 106, 99, 106 s.
 
-**Verdict:** the slowest day is 105 s of controller time (112 s with the simulator), about 5.7×
+**Verdict:** the slowest day is 103 s of controller time (110 s with the simulator), about 5.8×
 under the 10-minute budget, and the worst tick's decision lag is 7 s against a 15-simulated-minute
 tick. Memory is under 0.5 GB for the controller, so no optimisation was needed and none was made.
 
@@ -52,15 +52,15 @@ tick. Memory is under 0.5 GB for the controller, so no optimisation was needed a
 
 Estimates from the measurements above, not measured runs.
 
-1. **Decide (breaks first).** It is the larger share of every day (55–84 s) and it grows over the
-   run (55 s on D0, 81 s on D4) as the aggregates and experiments accumulate. It runs serially,
-   per workflow, per tick. At 10× workflows it is about 550–850 s per day, at or past the 10-minute
+1. **Decide (breaks first).** It is the larger share of every day (54–83 s) and it grows over the
+   run (54 s on D0, 79 s on D4) as the aggregates and experiments accumulate. It runs serially,
+   per workflow, per tick. At 10× workflows it is about 540–830 s per day, at or past the 10-minute
    budget, and the p95 tick lag moves from 1.6 s to roughly 16 s.
-2. **Ingest.** Linear in events: about 200 s/day at 42 k events/s. Fine alone, but it shares the
+2. **Ingest.** Linear in events: about 200 s/day at 44 k events/s. Fine alone, but it shares the
    one thread with decide, so together they exceed the budget. A single SQLite writer is the ceiling
    (ADR-0001); its transaction per chunk is already the atomic unit.
 3. **Memory.** The active-lead cache scales with leads in live campaigns (3-day cadence), so about
-   10× of today's share of the 450 MB, which is a few GB at most. The cell-aggregate design (ADR-0003)
+   10× of today's share of the 420 MB, which is a few GB at most. The cell-aggregate design (ADR-0003)
    keeps the analysis tables small; the audit-only `exposures` log is the one table that grows with
    every dial and would dominate disk (and need pruning or partitioning).
 4. **Simulator HTTP.** Chunk download is a small share today (advance is 7 s/day); it grows linearly.

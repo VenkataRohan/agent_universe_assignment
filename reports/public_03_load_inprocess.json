@@ -1,64 +1,64 @@
 {
   "mode": "in-process",
-  "startup_s": 63.9,
-  "wall_s": 492.1,
+  "startup_s": 60.5,
+  "wall_s": 478.5,
   "events_ingested_live": 4200164,
-  "ingest_s": 99.4,
-  "ingest_events_per_s": 42243,
+  "ingest_s": 96.3,
+  "ingest_events_per_s": 43631,
   "decision_lag_s": {
-    "p50": 0.809,
-    "p95": 1.64,
-    "max": 7.324
+    "p50": 0.783,
+    "p95": 1.576,
+    "max": 7.412
   },
   "days": [
     {
       "day": 0,
-      "wall_s": 82.8,
-      "controller_s": 75.8,
-      "sim_s": 7.1,
-      "ingest_s": 20.5,
-      "decide_s": 55.3,
-      "peak_rss_mb": 419.1
+      "wall_s": 80.2,
+      "controller_s": 73.2,
+      "sim_s": 7.0,
+      "ingest_s": 19.1,
+      "decide_s": 54.0,
+      "peak_rss_mb": 418.3
     },
     {
       "day": 1,
-      "wall_s": 85.3,
-      "controller_s": 78.1,
-      "sim_s": 7.2,
-      "ingest_s": 16.4,
-      "decide_s": 61.7,
-      "peak_rss_mb": 449.5
+      "wall_s": 82.7,
+      "controller_s": 75.7,
+      "sim_s": 7.0,
+      "ingest_s": 16.0,
+      "decide_s": 59.7,
+      "peak_rss_mb": 418.3
     },
     {
       "day": 2,
-      "wall_s": 112.2,
-      "controller_s": 105.0,
-      "sim_s": 7.2,
+      "wall_s": 110.4,
+      "controller_s": 103.2,
+      "sim_s": 7.1,
       "ingest_s": 20.6,
-      "decide_s": 84.4,
-      "peak_rss_mb": 449.5
+      "decide_s": 82.6,
+      "peak_rss_mb": 418.3
     },
     {
       "day": 3,
-      "wall_s": 101.8,
-      "controller_s": 94.5,
-      "sim_s": 7.3,
-      "ingest_s": 21.0,
-      "decide_s": 73.4,
-      "peak_rss_mb": 449.5
+      "wall_s": 98.8,
+      "controller_s": 91.7,
+      "sim_s": 7.1,
+      "ingest_s": 20.4,
+      "decide_s": 71.3,
+      "peak_rss_mb": 418.3
     },
     {
       "day": 4,
-      "wall_s": 109.9,
-      "controller_s": 102.4,
-      "sim_s": 7.5,
-      "ingest_s": 21.0,
-      "decide_s": 81.4,
-      "peak_rss_mb": 449.5
+      "wall_s": 106.4,
+      "controller_s": 99.2,
+      "sim_s": 7.2,
+      "ingest_s": 20.2,
+      "decide_s": 79.0,
+      "peak_rss_mb": 418.3
     }
   ],
-  "controller_peak_rss_mb": 450,
-  "simulator_peak_rss_mb": 772,
+  "controller_peak_rss_mb": 418,
+  "simulator_peak_rss_mb": 757,
   "scenario": "public_03_load.yaml",
   "host": {
     "cpus": 10,

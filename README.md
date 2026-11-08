@@ -268,11 +268,11 @@ the decisions not to act.
 Raw queries, for when the CLI doesn't answer it:
 
 ```bash
-sqlite3 -readonly state/controller.db \
+sqlite3 state/controller.db \
   "SELECT minute, kind, outcome, proposal_id FROM decisions WHERE workflow_id='ks_cancel' ORDER BY decision_id DESC LIMIT 20"
-sqlite3 -readonly state/controller.db \
+sqlite3 state/controller.db \
   "SELECT minute, workflow_id, outcome, detail FROM decisions WHERE outcome IN ('error','ingest_failed','retried')"
-sqlite3 -readonly state/controller.db \
+sqlite3 state/controller.db \
   "SELECT proposal_id, status, reasons FROM proposals WHERE status <> 'applied'"
 ```
 
@@ -313,7 +313,8 @@ Rules that keep it safe, which every change must keep:
 4. **A new statistical rule goes in `stats.py`,** with a test on synthetic counts and a simulated
    false-positive rate if it can fire repeatedly.
 5. **An LLM may suggest. It never decides.**
-6. **Customer-facing dimensions are never auto-applied** (`CUSTOMER_FACING_DIMS`, ADR-0002).
+6. **Customer-facing dimensions are never auto-applied** (`CUSTOMER_FACING_DIMS`, ADR-0002), and nothing
+   auto-applies on a dimension for 24 hours after an approver rejects a change to it (ADR-0009).
 
 | To add | Do this |
 |---|---|
