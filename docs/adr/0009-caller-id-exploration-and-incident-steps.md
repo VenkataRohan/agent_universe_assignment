@@ -7,9 +7,11 @@ The spec says a degraded caller ID is moved "within max_shift, otherwise propose
 - **Keep or drop reuses the screen rule** (`stats.screen`): not clearly worse, and above the numbers in use on its point estimate. A number at parity may be dropped. That loses nothing in expectation and keeps customers off a number that hasn't earned traffic.
 - **Dropped means dropped.** A number that was dropped, or moved off as degraded, is not explored again in this run, even after its evidence ages out.
 - **The cap binds the controller, not supervisors.** Only numbers the controller starts are capped and concluded. A supervisor's own choice is left alone, and exploration starts nothing for 7 days after a supervisor changes a workflow's caller IDs.
+- **A rejection stops auto-apply on that dimension for 24 hours.** Policy would allow the auto-apply, but an approver has just said no to changing this dimension, and going around them in the next tick isn't what a governance boundary means. It covers every auto-apply route, incident response included, and only the dimensions the rejected Proposal changed. A request the platform refused as invalid doesn't count: no approver saw it. An incident can still ask an approver again after 2 hours (ADR-0014).
 - **Exploration decides every tick, not at 09:00.** Every approver's hours start after 09:00, so a 09:00-only decision could never reach approval-only workflows. Its decisions not to act are recorded when they change, not on every tick.
 
 ## Consequences
 
 - On approval-only workflows exploration uses standalone requests until batching exists, one in flight at a time.
 - A number that recovers after being dropped stays unused for the rest of the run.
+- After a rejection, a degraded number keeps its remaining traffic until an approver says yes or 24 hours pass. That is the price of respecting the no.

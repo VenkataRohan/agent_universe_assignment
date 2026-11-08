@@ -6,13 +6,14 @@ exist, so the customer-facing boundary is also asked directly of the governance 
 """
 from __future__ import annotations
 
+import json
 from datetime import date, datetime
 
 import pytest
 
 from controller import queries
 from controller.__main__ import main as cli_main
-from controller.composer import compose, largest_shift
+from controller.composer import compose, largest_shift, set_distribution
 from controller.governance import GovernanceClient
 from controller.loop import Controller
 from controller.simclient import SimClient
@@ -338,3 +339,39 @@ def test_a_dropped_caller_id_is_not_explored_again_once_its_evidence_has_aged_ou
     dropped = next(p for p in explored if p["evidence"]["action"] == "drop" and p["evidence"]["caller_id"] == "D3")
     assert dropped["created_minute"] < 2 * 1440  # so its dials left the 7-day window well before the run ended
     assert [p["evidence"]["caller_id"] for p in explored if p["evidence"]["action"] == "start"].count("D3") == 1
+
+
+def test_nothing_is_auto_applied_on_a_dimension_for_24_hours_after_a_person_rejects_a_change_to_it(world, db_path):
+    client = world(days=3, history_days=1)
+    troubled, trouble = troubled_client(client, degrade={"ks_cancel": "D2"})
+    trouble.blank_summary = True  # the approver must reject the part of the move that needs asking
+
+    Controller(troubled, db_path).run()
+
+    moves = proposals_of(db_path, "ks_cancel")
+    rejected = [p["decided_minute"] for p in moves if p["status"] == "rejected"]
+    later_steps = [p for p in moves if p["route"] == "auto"][1:]
+    assert rejected
+    assert not [p["proposal_id"] for p in later_steps if any(0 <= p["created_minute"] - r < 1440 for r in rejected)]
+
+
+def test_a_rejection_blocks_auto_apply_only_on_its_own_dimensions_and_only_for_24_hours(world, db_path):
+    client = world(days=1, history_days=1)
+    store, sim = Store(db_path), SimClient(client)
+    governance = GovernanceClient(store, sim, client.get("/workflows").json())
+    current = sim.config("nw_renewal")
+    move = compose(current, set_distribution("caller_id", {"D1": 1.0}))
+    hours = {str(h): 1 for h in range(9, 21)}
+    schedule = compose(current, lambda cfg: cfg["schedule"]["hour_weights"].update(default=hours))
+    rejected_at = 11 * 60
+
+    with store.transaction() as conn:
+        Store.insert_proposal(conn, proposal_id="nw_renewal-caller_id-9", workflow_id="nw_renewal", kind="caller_id", seq=9,
+                              route="approval", incident=1, status="rejected", base_version=current["version"],
+                              body=json.dumps({"diff": move.diff, "evidence": {}}), replaces=None, created_minute=rejected_at,
+                              sent_minute=rejected_at)
+        Store.update_proposal(conn, "nw_renewal-caller_id-9", decided_minute=rejected_at)
+
+    assert "rejected" in governance.auto_apply_refusal("nw_renewal", "caller_id_explore", move, rejected_at + 1439)
+    assert governance.auto_apply_refusal("nw_renewal", "schedule", schedule, rejected_at + 1439) is None
+    assert governance.auto_apply_refusal("nw_renewal", "caller_id_explore", move, rejected_at + 1441) is None

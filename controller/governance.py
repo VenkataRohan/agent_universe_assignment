@@ -91,6 +91,9 @@ class GovernanceClient:
         shift = largest_shift(composed)
         if shift > policy.max_shift:
             return f"it moves {shift:.0%} of a cohort's traffic and auto-apply allows at most {policy.max_shift:.0%}"
+        rejected = sorted(set(composed.changed_dims) & self._store.rejected_dims_since(workflow_id, now - WINDOW_24H))
+        if rejected:
+            return f"an approver rejected a change to {', '.join(rejected)} in the last 24 hours"
         if self._store.auto_refused_since(workflow_id, kind, now - WINDOW_24H):
             return "the platform refused an auto-apply of this kind in the last 24 hours"
         return None

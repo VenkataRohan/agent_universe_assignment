@@ -429,6 +429,15 @@ class Store:
         return self.conn.execute("SELECT COUNT(*) FROM proposals WHERE workflow_id = ? AND kind = ? AND route = 'auto' "
                                  "AND status = 'refused' AND created_minute >= ?", (workflow_id, kind, minute)).fetchone()[0]
 
+    def rejected_dims_since(self, workflow_id: str, minute: int) -> set[str]:
+        """Dimensions changed by Proposals an approver rejected at or after `minute`.
+
+        A request the platform refused as invalid has no `sent_minute`: no approver saw it, so it doesn't count.
+        """
+        return {r[0] for r in self.conn.execute("SELECT DISTINCT d.key FROM proposals p, json_each(p.body, '$.diff') d "
+                                                "WHERE p.workflow_id = ? AND p.status = 'rejected' AND p.sent_minute IS NOT NULL "
+                                                "AND p.decided_minute >= ?", (workflow_id, minute))}
+
     def proposal_endings(self) -> list[sqlite3.Row]:
         """Every Proposal with its latest decision's minute and outcome, in order within each workflow and kind."""
         return self.conn.execute("SELECT p.proposal_id, p.workflow_id, p.kind, p.status, p.reasons, MAX(d.decision_id), "
