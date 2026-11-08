@@ -176,3 +176,19 @@ A caller ID with fewer than 300 dials in the last 7 days. Moving traffic never r
 
 **Credit reserve**:
 The credits held back for incident response that nothing else may spend.
+
+## Loop health
+
+**Alert**:
+A message about the loop's own health. In this controller every alert is a page.
+_Avoid_: Incident (an incident is about a workflow's calls)
+
+**Page**:
+An alert that needs a person now, saying what to look at. Only four conditions page: ingest lag above 2 ticks, credits below the reserve, an incident unfixed after 4 hours, and an apply failure.
+
+**Apply failure**:
+A lapsed approval, or a stale-base loop: three Proposals of one kind on one workflow going stale in a row.
+
+**Note**:
+Something shown by `controller health` that can wait: a rejection, an expiry, an inconclusive experiment, a retry.
+_Avoid_: Page, warning

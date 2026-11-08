@@ -22,6 +22,10 @@ Written by the governance client and the decide steps:
 - decisions  every decide step's outcome and inputs, including "did nothing"
 - experiments  each experiment's design and where its state machine has got to
 - incidents    each hallucination incident: what was seen, its candidates, its fix and how it ended
+
+Written by the loop at each tick:
+- credit_ticks  the credit balance the simulator reported at each tick
+- alerts        every page: raised when its condition began to hold, cleared when it stopped
 """
 from __future__ import annotations
 
@@ -183,6 +187,19 @@ CREATE TABLE IF NOT EXISTS decisions (
     detail      TEXT    NOT NULL   -- JSON: the inputs the decision was made from
 );
 CREATE INDEX IF NOT EXISTS decisions_by_wf ON decisions (workflow_id, minute);
+CREATE INDEX IF NOT EXISTS decisions_by_proposal ON decisions (proposal_id);
+CREATE TABLE IF NOT EXISTS credit_ticks (
+    minute            INTEGER PRIMARY KEY,
+    credits_remaining REAL NOT NULL
+) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS alerts (
+    alert_id       INTEGER PRIMARY KEY AUTOINCREMENT,
+    key            TEXT    NOT NULL,   -- one occurrence of a condition, e.g. the incident it is about
+    condition      TEXT    NOT NULL,
+    message        TEXT    NOT NULL,   -- what is wrong and what to look at
+    raised_minute  INTEGER NOT NULL,
+    cleared_minute INTEGER             -- NULL while active
+);
 CREATE TABLE IF NOT EXISTS experiments (
     experiment_id  TEXT PRIMARY KEY,
     workflow_id    TEXT    NOT NULL,
@@ -341,6 +358,10 @@ class Store:
         with self.transaction() as conn:
             conn.execute("UPDATE run SET sim_minute_seen = ?", (minute,))
 
+    def record_credits(self, minute: int, credits_remaining: float) -> None:
+        with self.transaction() as conn:
+            conn.execute("INSERT OR REPLACE INTO credit_ticks VALUES (?, ?)", (minute, credits_remaining))
+
     def mark_ingested_through(self, minute: int) -> None:
         """Every chunk published up to `minute` is in (a tick may publish none)."""
         with self.transaction() as conn:
@@ -408,6 +429,13 @@ class Store:
         return self.conn.execute("SELECT COUNT(*) FROM proposals WHERE workflow_id = ? AND kind = ? AND route = 'auto' "
                                  "AND status = 'refused' AND created_minute >= ?", (workflow_id, kind, minute)).fetchone()[0]
 
+    def proposal_endings(self) -> list[sqlite3.Row]:
+        """Every Proposal with its latest decision's minute and outcome, in order within each workflow and kind."""
+        return self.conn.execute("SELECT p.proposal_id, p.workflow_id, p.kind, p.status, p.reasons, MAX(d.decision_id), "
+                                 "d.minute ended_minute, d.outcome last_outcome "
+                                 "FROM proposals p JOIN decisions d USING (proposal_id) "
+                                 "GROUP BY p.proposal_id ORDER BY p.workflow_id, p.kind, p.seq").fetchall()
+
     def applied_evidence(self, workflow_id: str, kind: str, route: str | None = None,
                          since_minute: int | None = None) -> list[dict]:
         """The evidence of each applied Proposal of this kind, oldest first."""
@@ -446,6 +474,23 @@ class Store:
             if event["actor"] == "supervisor" and dimension in event["changed_dims"]:
                 return minute_of(event["ts"], self.d0())
         return None
+
+    # -- alerts (written only here) ---------------------------------------------------------------
+    @staticmethod
+    def active_alert_keys(conn: sqlite3.Connection) -> set[str]:
+        return {r[0] for r in conn.execute("SELECT key FROM alerts WHERE cleared_minute IS NULL")}
+
+    @staticmethod
+    def raise_alert(conn: sqlite3.Connection, key: str, condition: str, message: str, minute: int) -> None:
+        conn.execute("INSERT INTO alerts (key, condition, message, raised_minute) VALUES (?,?,?,?)", (key, condition, message, minute))
+
+    @staticmethod
+    def update_alert(conn: sqlite3.Connection, key: str, message: str) -> None:
+        conn.execute("UPDATE alerts SET message = ? WHERE key = ? AND cleared_minute IS NULL", (message, key))
+
+    @staticmethod
+    def clear_alert(conn: sqlite3.Connection, key: str, minute: int) -> None:
+        conn.execute("UPDATE alerts SET cleared_minute = ? WHERE key = ? AND cleared_minute IS NULL", (minute, key))
 
     # -- hallucination incidents (written only here) ----------------------------------------------
     def flag_ticks(self, workflow_id: str, first_minute: int, before_minute: int) -> list[sqlite3.Row]:
@@ -488,6 +533,16 @@ class Store:
         """The incident still being worked on, if any."""
         return self.conn.execute("SELECT * FROM incidents WHERE workflow_id = ? AND status IN ('open', 'verifying') "
                                  "ORDER BY seq DESC LIMIT 1", (workflow_id,)).fetchone()
+
+    def unfixed_incidents(self) -> list[sqlite3.Row]:
+        """Incidents with no fix in force: still open, or handed to a person. A spike the live prompt answered is neither."""
+        return self.conn.execute("SELECT * FROM incidents WHERE status = 'open' OR (status = 'escalated' "
+                                 "AND end_reason != 'live_prompt_passed_validation') ORDER BY incident_id").fetchall()
+
+    def prompt_changed_since(self, workflow_id: str, minute: int) -> bool:
+        d0 = self.d0()
+        return any("prompt_version" in e["changed_dims"] and minute_of(e["ts"], d0) >= minute
+                   for e in self.config_changes_after(workflow_id, 0))
 
     def ruled_out_prompts(self, workflow_id: str) -> set[str]:
         """Prompts that can't be gone back to: those blamed through a prompt change, and fixes that didn't work."""

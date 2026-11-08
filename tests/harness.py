@@ -100,7 +100,7 @@ class ScriptedWorld(httpx.BaseTransport):
         path, query = request.url.path, request.url.params
         if path == "/sim/state":
             return httpx.Response(200, json={"scenario": "scripted", "ts": "2027-01-04T00:00:00+05:30", "sim_minute": 0,
-                                             "tick_minutes": 15, "finished": False})
+                                             "tick_minutes": 15, "finished": False, "credits_remaining": 100})
         if path == "/workflows":
             return httpx.Response(200, json=[self.workflow])
         if path == "/events/chunks":
@@ -121,7 +121,7 @@ def faulty_client(client: httpx.Client, **kw) -> tuple[httpx.Client, ChunkFaults
     return httpx.Client(transport=faults, base_url=client.base_url), faults
 
 
-class Killed(Exception):
+class Killed(BaseException):
     """The controller process dying at an injected point. Nothing in the controller may catch it."""
 
 
@@ -137,6 +137,7 @@ class Trouble(httpx.BaseTransport):
     - `blank_summary`: every approval request goes out empty-summaried, so the approver must reject it.
     - Any config change whose proposal_id starts with `supervisor-` reads back as a supervisor edit.
       The simulator has no API for those, so a test makes one with PUT and this relabels it.
+      One starting `supervisor-prompt-` also reads back as a change to the prompt, which PUT can't make.
     - `lift` / `dampen`: workflow -> caller ID that looks better (one in five of its unanswered dials
       connects) or mildly worse (one in four of its answered calls never connects).
     - `dull`: workflow -> welcome or voice options whose answered calls never engage.
@@ -157,6 +158,10 @@ class Trouble(httpx.BaseTransport):
     - `approval_only`: the controller is shown policies without auto-apply and no spare caller IDs,
       welcome messages or voices, so every change takes the approval path and nothing but the test's
       own trouble is in play.
+    - `fail(...)`: matching requests answer 503 without reaching the simulator, the next `times` of them or until `recover()`,
+      which also disarms a pending `refuse`.
+    - `garbled`: paths that answer 200 with an empty object, which no reader of them can use.
+    - `credits_left`: `GET /sim/state` reports this balance instead of the real one.
     """
 
     def __init__(self, inner: httpx.BaseTransport, degrade: dict[str, str] | None = None, degrade_history: bool = False,
@@ -185,6 +190,9 @@ class Trouble(httpx.BaseTransport):
         self.hallucinate: dict[str, dict[str, float]] = {}
         self.requests: Counter[str] = Counter()
         self.validation_fails: dict[str, set[str]] = {}
+        self.credits_left: float | None = None
+        self._failing: dict[tuple[str, str], int | None] = {}
+        self.garbled: set[str] = set()
         self._seen = 0
         self._lifted = self._dampened = 0
 
@@ -200,9 +208,30 @@ class Trouble(httpx.BaseTransport):
     def refuse(self, method: str, path_end: str, status: int, code: str) -> None:
         self._refuse = (method, path_end, status, code)
 
+    def fail(self, method: str, path_end: str, times: int | None = None) -> None:
+        self._failing[(method, path_end)] = times
+
+    def recover(self) -> None:
+        self._failing.clear()
+        self._refuse = None
+
+    def _should_fail(self, method: str, path: str) -> bool:
+        for (m, end), left in self._failing.items():
+            if m == method and path.endswith(end):
+                if left is not None:
+                    if left == 0:
+                        return False
+                    self._failing[(m, end)] = left - 1
+                return True
+        return False
+
     def handle_request(self, request: httpx.Request) -> httpx.Response:
         method, path = request.method, request.url.path
         self.requests[path] += 1
+        if self._should_fail(method, path):
+            return httpx.Response(503, json={"error": "unavailable"})
+        if path in self.garbled:
+            return httpx.Response(200, json={})
         request = self._rewrite_request(request)
         if self._refuse is not None and method == self._refuse[0] and path.endswith(self._refuse[1]):
             status, code = self._refuse[2:]
@@ -225,6 +254,9 @@ class Trouble(httpx.BaseTransport):
             resp.read()
             lines = [self._rewrite_event(json.loads(l)) for l in resp.text.splitlines() if l]
             return httpx.Response(200, content="\n".join(json.dumps(l) for l in lines).encode())
+        if path == "/sim/state" and self.credits_left is not None:
+            resp.read()
+            return httpx.Response(200, json={**resp.json(), "credits_remaining": self.credits_left})
         if path == "/validation/runs" and resp.status_code == 200:
             resp.read()
             run = resp.json()
@@ -280,8 +312,10 @@ class Trouble(httpx.BaseTransport):
 
     @staticmethod
     def _relabel(ev: dict) -> dict:
-        if str(ev.get("proposal_id") or "").startswith("supervisor-"):
-            return {**ev, "actor": "supervisor", "proposal_id": None}
+        pid = str(ev.get("proposal_id") or "")
+        if pid.startswith("supervisor-"):
+            dims = ["prompt_version"] if pid.startswith("supervisor-prompt-") else ev["changed_dims"]
+            return {**ev, "actor": "supervisor", "proposal_id": None, "changed_dims": dims}
         return ev
 
     def _rewrite_event(self, ev: dict) -> dict:

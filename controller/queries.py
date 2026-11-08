@@ -15,6 +15,7 @@ from pathlib import Path
 from . import simtime
 from .cohorts import FEATURES, KPI_COUNTERS, Partition
 from .composer import describe_change
+from .credits import RESERVE
 from .store import connect, experiment_view, incident_view, load_partition
 
 
@@ -35,16 +36,22 @@ def daily_kpis(db: str | Path) -> list[dict]:
 
 
 def health(db: str | Path) -> dict:
-    """The loop's ingestion health: cursor, events ingested, ingest lag."""
+    """The loop's health: cursor, ingest lag, decisions per hour, credit burn and active alerts."""
     conn = connect(db, readonly=True)
     try:
         r = conn.execute("SELECT * FROM run").fetchone()
+        if r is None:
+            return {"started": False}
+        now = r["sim_minute_seen"]
+        decisions_last_hour = conn.execute("SELECT COUNT(*) FROM decisions WHERE minute > ? AND kind != 'loop'", (now - 60,)).fetchone()[0]
+        burn = _credit_burn(conn, now)
+        alerts = [dict(a) for a in conn.execute("SELECT condition, message, raised_minute FROM alerts "
+                                                "WHERE cleared_minute IS NULL ORDER BY alert_id")]
+        notes = _notes(conn, now)
     except sqlite3.OperationalError:  # the controller hasn't created its schema yet
-        r = None
+        return {"started": False}
     finally:
         conn.close()
-    if r is None:
-        return {"started": False}
     lag_minutes = max(0, r["sim_minute_seen"] - r["ingested_through_minute"])
     return {
         "started": True,
@@ -56,7 +63,35 @@ def health(db: str | Path) -> dict:
         "last_event_id": r["last_event_id"],
         "ingest_lag_ticks": lag_minutes / r["tick_minutes"],
         "seconds_since_last_ingest": round(time.time() - r["updated_at"], 1) if r["updated_at"] else None,
+        "decisions_last_hour": decisions_last_hour,
+        "credits": burn,
+        "alerts": alerts,
+        "notes": notes,
     }
+
+
+def _notes(conn: sqlite3.Connection, now: int) -> list[dict]:
+    """What did not page but is worth seeing, newest first: rejections, expiries, inconclusive experiments, retries."""
+    rows = conn.execute(
+        "SELECT * FROM decisions WHERE minute > ? AND (kind = 'loop' "
+        "OR (kind = 'proposal' AND (outcome IN ('send_failed', 'apply_failed') "
+        "OR json_extract(detail, '$.to') IN ('rejected', 'expired', 'stale', 'refused'))) "
+        "OR (kind = 'experiment' AND outcome IN ('inconclusive', 'no_candidate', 'blocked')) "
+        "OR (kind = 'hallucination' AND outcome = 'escalated')) ORDER BY decision_id DESC",
+        (now - simtime.MINUTES_PER_DAY,)).fetchall()
+    return [{"minute": r["minute"], "workflow_id": r["workflow_id"], "kind": r["kind"], "outcome": r["outcome"], "proposal_id": r["proposal_id"],
+             "detail": {k: v for k, v in json.loads(r["detail"]).items() if k != "experiment"}} for r in rows]
+
+
+def _credit_burn(conn: sqlite3.Connection, now: int) -> dict | None:
+    """Credits left, spent since the controller started, and spent in the last simulated day."""
+    first = conn.execute("SELECT credits_remaining FROM credit_ticks ORDER BY minute LIMIT 1").fetchone()
+    if first is None:
+        return None
+    left = conn.execute("SELECT credits_remaining FROM credit_ticks ORDER BY minute DESC LIMIT 1").fetchone()[0]
+    day_ago = conn.execute("SELECT credits_remaining FROM credit_ticks WHERE minute <= ? ORDER BY minute DESC LIMIT 1",
+                           (now - simtime.MINUTES_PER_DAY,)).fetchone()
+    return {"remaining": left, "spent": first[0] - left, "spent_last_day": (day_ago or first)[0] - left, "reserve": RESERVE}
 
 
 def exposures(db: str | Path, lead_id: str) -> list[dict]:

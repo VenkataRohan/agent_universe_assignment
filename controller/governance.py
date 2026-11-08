@@ -35,6 +35,7 @@ REBUILT_FROM = {REJECTED: "was rejected", EXPIRED: "expired", LAPSED: "lapsed", 
                 REFUSED: "was refused auto-apply"}
 APPROVAL_ROUTE, AUTO_ROUTE = "approval", "auto"
 INCIDENT_LABEL = "[Incident response] "
+CONFIG_CHANGED_BEFORE_SENT = "the config changed before this was sent"
 
 WINDOW_24H = MINUTES_PER_DAY
 # A human said no, or the platform refused the request as invalid: asking again at once can't help.
@@ -187,7 +188,7 @@ class GovernanceClient:
                 if sent is not None:
                     self._mark_pending(p, sent, now, "duplicate_reconciled")
             elif e.code == "stale_base_version":
-                self._abandon(p, now, "the config changed before this was sent")
+                self._abandon(p, now, CONFIG_CHANGED_BEFORE_SENT)
             elif e.retryable:  # may or may not have arrived; reconcile will find out
                 self._note(p, now, "send_failed", {"error": str(e)})
             else:
@@ -250,7 +251,7 @@ class GovernanceClient:
         policy = self._policy(p["workflow_id"])
         others = self._store.requests_since(p["workflow_id"], now - WINDOW_24H, excluding=p["proposal_id"])
         if version != p["base_version"]:
-            self._abandon(p, now, "the config changed before this was sent")
+            self._abandon(p, now, CONFIG_CHANGED_BEFORE_SENT)
         elif not policy.may_request_at(now):
             self._abandon(p, now, "request hours ended before this was sent")
         elif others >= policy.max_requests_per_24h:

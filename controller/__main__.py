@@ -21,6 +21,8 @@ import httpx
 from . import queries, simtime
 from .loop import Controller, ResumeRefused
 
+MAX_NOTES_SHOWN = 20
+
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="controller")
@@ -30,7 +32,7 @@ def main(argv: list[str] | None = None) -> int:
                     help="if the store belongs to another world, move it aside and start fresh "
                          "instead of refusing (used by run.sh so unattended runs need no manual step)")
     sub = ap.add_subparsers(dest="cmd")
-    h = sub.add_parser("health", help="cursor, events ingested and ingest lag")
+    h = sub.add_parser("health", help="ingest lag, decisions per hour, credit burn and active alerts")
     h.add_argument("--db", default=argparse.SUPPRESS)
     st = sub.add_parser("status", help="each workflow's analysis partition and history baselines")
     st.add_argument("workflow", nargs="?", help="just this workflow (default: all)")
@@ -104,9 +106,22 @@ def _health(db: Path) -> int:
         ("ingest lag", f"{h['ingest_lag_ticks']:g} ticks (simulator at {simtime.label(h['sim_minute_seen'])})"
                        + (f"; last ingest {h['seconds_since_last_ingest']}s ago"
                           if h["seconds_since_last_ingest"] is not None else "")),
+        ("decisions/hour", f"{h['decisions_last_hour']} in the last simulated hour"),
     ]
+    c = h["credits"]
+    if c is not None:
+        rows.append(("credits", f"{c['remaining']:g} left, {c['spent']:g} spent ({c['spent_last_day']:g} in the last "
+                                f"simulated day), reserve {c['reserve']}"))
+    rows.append(("alerts", f"{len(h['alerts'])} active" if h["alerts"] else "none"))
+    rows.append(("notes", f"{len(h['notes'])} in the last simulated day" if h["notes"] else "none"))
     for k, v in rows:
         print(f"{k:<18}{v}")
+    for a in h["alerts"]:
+        print(f"  PAGE {simtime.label(a['raised_minute'])}  {a['condition']}: {a['message']}")
+    for n in h["notes"][:MAX_NOTES_SHOWN]:
+        print(f"  note {simtime.label(n['minute'])}  {n['workflow_id']}  {n['outcome']}  {n['proposal_id'] or ''}{_decision_reason(n['detail'])}")
+    if len(h["notes"]) > MAX_NOTES_SHOWN:
+        print(f"  ...and {len(h['notes']) - MAX_NOTES_SHOWN} older")
     return 0
 
 
@@ -215,7 +230,7 @@ def _experiment_line(e: dict) -> str:
 
 def _decision_reason(detail: dict) -> str:
     """Why a decision came out as it did, for the kinds of decision that have a reason to give."""
-    for key in ("hold", "why", "reasons", "error", "violations"):
+    for key in ("hold", "why", "reason", "reasons", "error", "retries", "violations"):
         if detail.get(key):
             return f"  ({detail[key]})"
     return ""

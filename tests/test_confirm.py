@@ -193,6 +193,9 @@ def test_an_experiment_with_no_decision_after_three_looks_is_inconclusive_and_re
     exp = experiment(db_path)
     assert exp["status"] == "inconclusive" and exp["end_reason"] == "no_winner" and exp["confirm_looks"] == 3
     assert [d["outcome"] for d in outcomes(db_path) if d["outcome"] in ("confirm_look", "inconclusive")] == ["confirm_look", "confirm_look", "inconclusive"]
+    health = queries.health(db_path)  # an inconclusive experiment is a note, not a page
+    assert not [a for a in health["alerts"] if exp["experiment_id"] in a["message"]]
+    assert "inconclusive" in {n["outcome"] for n in health["notes"]}
     ended_back_on_control(client, db_path)
 
 

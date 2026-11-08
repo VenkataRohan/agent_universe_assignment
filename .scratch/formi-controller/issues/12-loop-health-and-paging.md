@@ -12,9 +12,9 @@ Spec: user stories 68, 74–76.
 
 **Blocked by:** 06
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] `controller health` shows lag, decisions/hour, credit burn and alerts during a run
-- [ ] Each of the four page conditions raises a page with an actionable message when induced
-- [ ] Non-page conditions appear only as notes
-- [ ] An injected 5xx on one workflow's call is retried and does not stop other workflows
+- [x] `controller health` shows lag, decisions/hour, credit burn and alerts during a run
+- [x] Each of the four page conditions raises a page with an actionable message when induced
+- [x] Non-page conditions appear only as notes
+- [x] An injected 5xx on one workflow's call is retried and does not stop other workflows

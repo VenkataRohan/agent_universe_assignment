@@ -134,6 +134,7 @@ def test_a_spike_on_a_live_prompt_that_passes_validation_is_escalated_without_ch
     assert trouble.requests["/llm/suggest-fixes"] == 0
     assert live_prompt(client) == "P1"
     assert [p for p in queries.proposals(db_path, WF) if p["kind"] == "hallucination"] == []
+    assert queries.health(db_path)["alerts"] == []  # a spike the live prompt answered is a note, not a page
 
 
 def run_until(controller, condition, then) -> None:

@@ -32,11 +32,12 @@ class SimError(Exception):
 
 class SimClient:
     def __init__(self, http: httpx.Client, retries: int = 5, backoff_s: float = 0.5,
-                 sleep: Callable[[float], None] = time.sleep):
+                 sleep: Callable[[float], None] = time.sleep, on_retry: Callable[[str], None] = lambda _: None):
         self._http = http
         self._retries = retries
         self._backoff_s = backoff_s
         self._sleep = sleep
+        self._on_retry = on_retry
 
     # -- reads ---------------------------------------------------------------------------------
     def state(self) -> dict:
@@ -116,11 +117,16 @@ class SimClient:
                 if r.status_code < 500:
                     raise _as_error(r)
             if attempt < self._retries:
+                self._on_retry(f"POST /sim/advance failed, attempt {attempt + 1}")
                 self._sleep(delay)
                 delay *= 2
         raise SimError(0, "advance_failed", f"could not reach minute {target_minute}")
 
     # -- plumbing ------------------------------------------------------------------------------
+    def back_off(self, attempt: int) -> None:
+        """Wait before try number `attempt + 1`, for a caller that does its own retrying."""
+        self._sleep(self._backoff_s * 2 ** (attempt - 1))
+
     def _once(self, method: str, path: str, body: dict) -> Any:
         try:
             r = self._http.request(method, path, json=body)
@@ -141,6 +147,7 @@ class SimClient:
             except httpx.TransportError as e:
                 if attempt == self._retries:
                     raise SimError(0, "transport_error", str(e)) from e
+                self._on_retry(f"{method} {path}: {e}")
             else:
                 if r.status_code < 400:
                     return r
@@ -148,6 +155,7 @@ class SimClient:
                     raise _as_error(r)
                 if attempt == self._retries:
                     raise _as_error(r)
+                self._on_retry(f"{method} {path}: {r.status_code}")
             self._sleep(delay)
             delay *= 2
         raise AssertionError("unreachable")

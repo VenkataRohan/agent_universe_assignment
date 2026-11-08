@@ -2,18 +2,21 @@
 
 Each tick: advance the simulated clock -> ingest every chunk after the cursor -> for each workflow,
 reconcile its Proposals (applying any approval), respond to hallucination incidents, run the caller-ID check, then experiments, then
-call-time tuning, then caller-ID exploration. Later tickets add more detection and decisions to `_decide`.
+call-time tuning, then caller-ID exploration. Then, whatever happened, re-judge the alerts.
+
+Ingest failing does not stop the clock: nothing is decided on a store that is behind, and the lag pages (ADR-0015).
 """
 from __future__ import annotations
 
 import logging
+import time
 from collections.abc import Callable, Mapping
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
 import httpx
 
-from . import analysis, callerid, experiments, hallucination, schedule
+from . import alerts, analysis, callerid, experiments, hallucination, schedule
 from .credits import Credits
 from .governance import GovernanceClient
 from .ingest import IngestError, Ingestor
@@ -23,6 +26,7 @@ from .store import Store
 
 log = logging.getLogger("controller")
 CHUNK_ATTEMPTS = 3
+NO_WORKFLOW = "-"  # the workflow_id of a decision about the loop itself
 
 
 class ResumeRefused(Exception):
@@ -30,8 +34,10 @@ class ResumeRefused(Exception):
 
 
 class Controller:
-    def __init__(self, http: httpx.Client, db_path: str | Path, overlays: Mapping[str, Overlay] = OVERLAYS):
-        self.sim = SimClient(http)
+    def __init__(self, http: httpx.Client, db_path: str | Path, overlays: Mapping[str, Overlay] = OVERLAYS,
+                 sleep: Callable[[float], None] = time.sleep):
+        self._retried: list[str] = []  # what had to be tried again since the last tick ended
+        self.sim = SimClient(http, sleep=sleep, on_retry=self._retried.append)
         self._credits = Credits(self.sim)
         self.store = Store(db_path)
         self._overlays = overlays
@@ -63,14 +69,13 @@ class Controller:
         _, through = self.store.cursor()
         self._ingestor.warm(self._ingestor.day(_ts_at(d0, through)))
         self._state = st
+        self.store.record_credits(st["sim_minute"], st["credits_remaining"])
         self._catch_up()
         analysis.bootstrap_from_history(self.store, workflows)
         self._workflows = workflows
         self._governance = GovernanceClient(self.store, self.sim, workflows, self._overlays, experiments.with_holdback_release)
         # A Proposal left half-done by an earlier life must not wait for the next tick.
-        for w in workflows:
-            self._guarded(w["workflow_id"], self._state["sim_minute"], self._governance.reconcile,
-                          w["workflow_id"], self._state["sim_minute"])
+        self._reconcile(self._state["sim_minute"])
 
     def step(self) -> bool:
         """Advance one tick and ingest what it produced. Returns True once the scenario is finished."""
@@ -79,10 +84,14 @@ class Controller:
         if self._state["finished"]:
             return True
         self._state = self.sim.advance_to(self._state["sim_minute"] + self._state["tick_minutes"])
-        self.store.record_sim_minute(self._state["sim_minute"])
-        self._catch_up()
+        now = self._state["sim_minute"]
+        self.store.record_sim_minute(now)
+        self.store.record_credits(now, self._state["credits_remaining"])
+        caught_up = self._try_catch_up(now)
         if not self._state["finished"]:
-            self._decide(self._state["sim_minute"])
+            self._decide(now) if caught_up else self._reconcile(now)
+        self._note_retries(now)
+        alerts.sync(self.store, now, self._state["credits_remaining"])
         return bool(self._state["finished"])
 
     def run(self) -> None:
@@ -98,6 +107,12 @@ class Controller:
         for w in self._workflows:
             self._guarded(w["workflow_id"], now, self._decide_workflow, w, now)
 
+    def _reconcile(self, now: int) -> None:
+        """Proposals follow the platform, not the store, so an approval needn't wait for ingest and lapse."""
+        assert self._governance is not None
+        for w in self._workflows:
+            self._guarded(w["workflow_id"], now, self._governance.reconcile, w["workflow_id"], now)
+
     def _decide_workflow(self, workflow: dict, now: int) -> None:
         assert self._governance is not None
         self._governance.reconcile(workflow["workflow_id"], now)
@@ -109,15 +124,33 @@ class Controller:
         callerid.explore(self.store, self.sim, self._governance, workflow, now, flagged)
 
     def _guarded(self, workflow_id: str, now: int, action: Callable[..., None], *args: object) -> None:
-        """One workflow's trouble with the simulator is a recorded outcome, never the loop's end."""
+        """One workflow's trouble, whatever it is, is a recorded outcome, never the loop's end."""
         try:
             action(*args)
-        except SimError as e:
-            log.warning("%s: decide step failed: %s", workflow_id, e)
-            with self.store.transaction() as conn:
-                Store.record_decision(conn, now, workflow_id, "loop", "error", None, {"error": str(e)})
+        except Exception as e:
+            log.exception("%s: decide step failed", workflow_id)
+            self._note(now, workflow_id, "error", {"error": f"{type(e).__name__}: {e}"})
+
+    def _note_retries(self, now: int) -> None:
+        if self._retried:
+            self._note(now, NO_WORKFLOW, "retried", {"retries": self._retried})
+            self._retried.clear()
+
+    def _note(self, now: int, workflow_id: str, outcome: str, detail: dict) -> None:
+        with self.store.transaction() as conn:
+            Store.record_decision(conn, now, workflow_id, "loop", outcome, None, detail)
 
     # -- ingestion -----------------------------------------------------------------------------
+    def _try_catch_up(self, now: int) -> bool:
+        """Catch up, or say why not. Nothing new is decided on a store that is behind; the next tick tries again."""
+        try:
+            self._catch_up()
+        except Exception as e:
+            log.exception("ingest failed at minute %d", now)
+            self._note(now, NO_WORKFLOW, "ingest_failed", {"error": f"{type(e).__name__}: {e}"})
+            return False
+        return True
+
     def _catch_up(self) -> None:
         """Ingest, in order, every chunk the simulator has published after the cursor."""
         cursor, _ = self.store.cursor()
@@ -136,6 +169,8 @@ class Controller:
                 log.warning("ingest attempt %d/%d failed: %s", attempt, CHUNK_ATTEMPTS, e)
                 if attempt == CHUNK_ATTEMPTS:
                     raise
+                self._retried.append(f"chunk {meta['chunk']}: {e}")
+                self.sim.back_off(attempt)
 
 
 def _check_same_world(run, st: dict) -> None:
