@@ -16,6 +16,7 @@ CONFIRM_MAX_DAYS = 7  # how long a confirm may wait for half its planned sample 
 GUARDRAIL_ALPHA = 0.05
 HARM_ALPHA = 0.10  # per cohort, deliberately uncorrected: a harm check should err towards blocking
 DECAY_ALPHA = 0.05
+SCHEDULE_ROLLBACK_ALPHA = 0.05
 SCREEN_ELIMINATION_ALPHA = 0.05
 SCREEN_MIN_TRAFFIC_PER_ARM = 200  # about two days for the smallest arm of a split at the traffic we measured (ADR-0010)
 SCREEN_MAX_DAYS = 4               # how long a screen may wait for that traffic before it ends without a candidate
@@ -173,6 +174,11 @@ def decayed_strata(pairs: Sequence[tuple[Counts, Counts]]) -> Verdict:
     """`decayed` over (winner, holdback) strata. With one stratum it is the same test."""
     p = _p_greater_strata([(holdback, winner) for winner, holdback in pairs])
     return Verdict(p < DECAY_ALPHA, p)
+
+
+def schedule_dropped(after: Counts, before: Counts) -> Verdict:
+    """One-sided test that the primary KPI fell after a schedule change, against the days before it."""
+    return _one_sided(before, after, SCHEDULE_ROLLBACK_ALPHA)
 
 
 @dataclass(frozen=True)

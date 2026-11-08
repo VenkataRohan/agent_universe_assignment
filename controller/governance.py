@@ -55,6 +55,7 @@ class Draft:
     gain_lower_bound: float  # conservative gain in conclusion rate on the traffic this moves
     affected_share: float    # the share of the workflow's traffic this moves
     incident: bool = False
+    dry_run: dict | None = None  # for a change the allocation replay can't see; otherwise that replay is used
 
 
 Batcher = Callable[[Store, Mapping, Draft, int], Draft]  # what else should go out with this Draft
@@ -71,6 +72,9 @@ class GovernanceClient:
 
     def max_shift(self, workflow_id: str) -> float:
         return self._policy(workflow_id).max_shift
+
+    def auto_apply_covers(self, workflow_id: str, dimension: str) -> bool:
+        return dimension in self._policy(workflow_id).auto_apply_dims
 
     # -- may we change it ourselves? -----------------------------------------------------------
     def auto_apply_refusal(self, workflow_id: str, kind: str, composed: Composed, now: int,
@@ -136,7 +140,7 @@ class GovernanceClient:
         wf, kind, composed = draft.workflow_id, draft.kind, draft.composed
         workflow = self._workflows[wf]
         affected_leads = replay.affected_leads(self._store, workflow, composed, now)
-        dry_run = replay.dry_run(self._store, workflow, composed, now)
+        dry_run = draft.dry_run or replay.dry_run(self._store, workflow, composed, now)
         impact = stats.impact_score(draft.gain_lower_bound, draft.affected_share, draft.incident)
         note = self._supervisor_edit_note(wf, composed)
         rationale = f"{draft.rationale} {note}" if note else draft.rationale

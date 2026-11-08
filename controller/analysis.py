@@ -33,12 +33,12 @@ def _analyse(conn: sqlite3.Connection, workflow: dict) -> None:
     Store.save_baselines(conn, wf, primary, partition, sum(r["dials"] for r in rows),
                          sum(r["connected"] for r in rows), sum(r["engaged"] for r in rows), sum(r["flags"] for r in rows))
     Store.save_cohorts(conn, wf, partition)
-    Store.save_hour_rates(conn, wf, _hour_rates(
+    Store.save_hour_rates(conn, wf, hour_rates(
         [(partition.cohort_of({f: r[f] for f in FEATURES}), r["hour"], r["band"], r[traffic_col], r[successes_col])
          for r in rows]))
 
 
-def _hour_rates(rows: list[tuple[str, int, int, int, int]]) -> list[tuple[str, int, int, int, float]]:
+def hour_rates(rows: list[tuple[str, int, int, int, int]]) -> list[tuple[str, int, int, int, float]]:
     """Per cohort and hour: (cohort, hour, traffic, successes, attempt-adjusted rate).
 
     `rows`: (cohort, hour, attempt band, traffic, successes). Later attempts convert differently,

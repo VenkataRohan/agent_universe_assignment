@@ -12,7 +12,7 @@ from statistics import NormalDist
 from typing import NamedTuple
 
 from .cohorts import FEATURES, Partition
-from .composer import ALLOCATION_DIMS, Composed, config_cohort_of, effective_dist
+from .composer import ALLOCATION_DIMS, Composed, config_cohort_of, effective_dist, effective_hours
 from .simtime import MINUTES_PER_DAY
 from .store import Store, load_partition
 
@@ -41,15 +41,19 @@ def _calls_by(rows: Iterable[sqlite3.Row], dim: str) -> dict[str, Calls]:
 def affected_leads(store: Store, workflow: Mapping, composed: Composed, now: int) -> int:
     """Leads this change will reach: active campaigns of affected cohorts (unless locked) plus tomorrow's."""
     first_active_day = now // MINUTES_PER_DAY - len(workflow["cadence"]) + 1
-    total = affected = 0
+    total = affected = hours_affected = 0
     for r in store.active_leads_by_cell(workflow["workflow_id"], first_active_day):
         total += r["leads"]
         features = {f: r[f] for f in FEATURES}
         cohort_before, cohort_after = (config_cohort_of(c, features) for c in (composed.base_config, composed.config))
-        if any(effective_dist(composed.base_config, cohort_before, d) != effective_dist(composed.config, cohort_after, d)
-               for d in ALLOCATION_DIMS):
+        hours_change = effective_hours(composed.base_config, cohort_before) != effective_hours(composed.config, cohort_after)
+        if hours_change:
+            hours_affected += r["leads"]
+        if hours_change or any(effective_dist(composed.base_config, cohort_before, d) != effective_dist(composed.config, cohort_after, d)
+                               for d in ALLOCATION_DIMS):
             affected += r["leads"]
-    running = 0 if workflow["mid_flight"] == "next_campaign_only" else affected
+    # A schedule applies to running campaigns whatever the mid-flight rule says.
+    running = hours_affected if workflow["mid_flight"] == "next_campaign_only" else affected
     return running + round(workflow["daily_batch"]["size"] * (affected / total if total else 1.0))
 
 
@@ -60,13 +64,13 @@ def dry_run(store: Store, workflow: Mapping, composed: Composed, now: int) -> di
     objective = workflow["objective"]
     primary, guardrail = objective["primary"], next(iter(objective["guardrail"])).removesuffix("_max_drop")
     cohorts = _cohort_replays(rows, before, after, load_partition(store.conn, wf))
-    at_risk = sorted(c for c, r in cohorts.items() if any(_at_risk(r[k]) for k in (primary, guardrail)))
+    risky = sorted(c for c, r in cohorts.items() if any(at_risk(r[k]) for k in (primary, guardrail)))
     return {"window_hours": DRY_RUN_HOURS, "dials_replayed": sum(r["dials"] for r in rows),
             "primary_kpi": primary, "guardrail_kpi": guardrail, "overall": _replay(rows, before, after),
-            "cohorts": cohorts, "cohorts_at_risk": at_risk}
+            "cohorts": cohorts, "cohorts_at_risk": risky}
 
 
-def _at_risk(kpi: Mapping) -> bool:
+def at_risk(kpi: Mapping) -> bool:
     """The predicted drop is larger than the prediction's own uncertainty."""
     return kpi["current"] is not None and kpi["proposed"] is not None and kpi["current"] - kpi["proposed"] > kpi["margin"]
 

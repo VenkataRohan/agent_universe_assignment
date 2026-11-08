@@ -89,6 +89,21 @@ def set_distribution(dim: str, distribution: Mapping[str, float]) -> Intent:
     return intent
 
 
+def write_cohorts(cohorts: Collection[Mapping]) -> Intent:
+    """Add these cohorts to the config unless it already has them."""
+    def intent(config: dict) -> None:
+        present = {c["id"] for c in config["cohorts"]}
+        config["cohorts"].extend(dict(c) for c in cohorts if c["id"] not in present)
+    return intent
+
+
+def set_hour_tables(tables: Mapping[str, Mapping[str, float]]) -> Intent:
+    """Replace every cohort's hour table. Anything else in the schedule stays."""
+    def intent(config: dict) -> None:
+        config["schedule"]["hour_weights"] = {cohort: dict(table) for cohort, table in tables.items()}
+    return intent
+
+
 def _shares(dist: Mapping[str, float]) -> dict[str, float]:
     total = sum(dist.values())
     return {c: w / total for c, w in dist.items() if w > 0}
@@ -155,6 +170,12 @@ def effective_dist(config: Mapping, cohort: str, dim: str) -> dict[str, float]:
     """A cohort's weights on one dimension, normalised; a cohort that omits the dimension uses default's."""
     allocations = config["allocations"]
     return normalised(allocations.get(cohort, {}).get(dim) or allocations.get("default", {}).get(dim)) or {}
+
+
+def effective_hours(config: Mapping, cohort: str) -> dict[str, float]:
+    """The hour table a cohort is dialled from: its own, else default's, else none (every hour weighs the same)."""
+    tables = config["schedule"]["hour_weights"]
+    return tables.get(cohort) or tables.get("default") or {}
 
 
 def caller_id_dist(config: Mapping, cohort: str) -> dict[str, float]:

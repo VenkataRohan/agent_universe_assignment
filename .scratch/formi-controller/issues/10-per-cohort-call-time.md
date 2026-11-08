@@ -6,9 +6,9 @@ Spec: user stories 14, 34–36.
 
 **Blocked by:** 03, 05
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] Every proposed hour table covers every dialling-window hour and is accepted by the simulator
-- [ ] No schedule Proposal is made when the replay predicts < 3% gain
-- [ ] nw_renewal schedule changes auto-apply; nw_kyc's go through approval
-- [ ] A significant post-apply drop triggers a rollback Proposal
+- [x] Every proposed hour table covers every dialling-window hour and is accepted by the simulator
+- [x] No schedule Proposal is made when the replay predicts < 3% gain
+- [x] nw_renewal schedule changes auto-apply; nw_kyc's go through approval
+- [x] A significant post-apply drop triggers a rollback Proposal

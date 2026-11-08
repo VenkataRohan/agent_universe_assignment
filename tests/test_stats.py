@@ -414,3 +414,17 @@ def test_a_stratum_with_no_holdback_calls_adds_nothing_to_decay():
     only = (stats.Counts(500, 1000), stats.Counts(537, 1000))
     assert stats.decayed_strata([only, (stats.Counts(40, 80), stats.Counts(0, 0))]) == stats.decayed(*only)
     assert stats.decayed_strata([]) == stats.Verdict(False, 1.0)
+
+
+def test_a_schedule_dropped_when_the_kpi_is_significantly_below_the_three_days_before():
+    verdict = stats.schedule_dropped(stats.Counts(400, 1000), stats.Counts(450, 1000))  # z = 2.262 worked by hand
+
+    assert verdict.holds and verdict.p_value == pytest.approx(0.0118, abs=1e-3)
+
+
+def test_a_schedule_has_not_dropped_on_a_gap_within_noise_or_a_rise():
+    within_noise = stats.schedule_dropped(stats.Counts(430, 1000), stats.Counts(450, 1000))  # z = 0.90
+    rise = stats.schedule_dropped(stats.Counts(500, 1000), stats.Counts(450, 1000))
+
+    assert not within_noise.holds and within_noise.p_value == pytest.approx(0.184, abs=1e-3)
+    assert not rise.holds

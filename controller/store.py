@@ -258,12 +258,12 @@ class Store:
 
     @staticmethod
     def history_call_counts(conn: sqlite3.Connection, workflow_id: str) -> list[sqlite3.Row]:
-        """Call counters from before D0, per feature cell, hour and attempt band."""
+        """Call counters from before D0, per day, feature cell, hour and attempt band."""
         return conn.execute(
-            "SELECT lang, city_tier, age_band, value_band, a.hour hour, a.attempt_band band, SUM(a.dials) dials, "
+            "SELECT a.day day, lang, city_tier, age_band, value_band, a.hour hour, a.attempt_band band, SUM(a.dials) dials, "
             "SUM(a.connected) connected, SUM(a.engaged) engaged, SUM(a.hallucination_flags) flags "
             "FROM cell_agg a JOIN feature_cells USING (cell_id) "
-            "WHERE a.workflow_id = ? AND a.day < 0 GROUP BY a.cell_id, a.hour, a.attempt_band", (workflow_id,)).fetchall()
+            "WHERE a.workflow_id = ? AND a.day < 0 GROUP BY a.day, a.cell_id, a.hour, a.attempt_band", (workflow_id,)).fetchall()
 
     @staticmethod
     def analysed_workflows(conn: sqlite3.Connection) -> set[str]:
@@ -475,6 +475,13 @@ class Store:
             "AND (?4 IS NULL OR a.day * 24 + a.hour >= ?4) AND (?5 IS NULL OR a.day * 24 + a.hour < ?5) "
             "GROUP BY a.config_version, v.welcome_message, v.voice, a.cell_id",
             (workflow_id, first_version, json.dumps(list(excluded_cohorts)), first_hour, before_hour)).fetchall()
+
+    def kpi_totals(self, workflow_id: str, first_hour: int, before_hour: int) -> sqlite3.Row:
+        """Dials, connected calls and how many engaged, from the first hour since D0 up to, not including, the second."""
+        return self.conn.execute(
+            "SELECT COALESCE(SUM(dials), 0) dials, COALESCE(SUM(connected), 0) connected, COALESCE(SUM(engaged), 0) engaged "
+            "FROM cell_agg WHERE workflow_id = ?1 AND day * 24 + hour >= ?2 AND day * 24 + hour < ?3",
+            (workflow_id, first_hour, before_hour)).fetchone()
 
     def option_counts(self, workflow_id: str, first_hour: int, last_hour: int) -> list[sqlite3.Row]:
         """Per welcome message, voice, caller ID and feature cell, call counters between two hours since D0 (inclusive)."""

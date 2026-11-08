@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from collections import Counter
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 import httpx
 
 
@@ -147,6 +147,8 @@ class Trouble(httpx.BaseTransport):
     - `voice_only`: the controller is shown no spare welcome messages or caller IDs, so voice is the only thing
       it can experiment on and no other change starts a new config version.
     - `primary`: workflow -> the primary KPI the controller is shown for it, instead of its own.
+    - `hour_shaped`: workflow -> [(KPI, f(features, hour) -> rate)]: each KPI happens at exactly that rate, in order, so a
+      cohort's best hours are known by construction. With `degrade_history`, history follows the same rules.
     - `no_experiments`: the controller is shown no spare welcome messages or voices, so it has nothing to
       experiment on and a test about something else keeps its traffic and its one in-flight Proposal.
     - `approval_only`: the controller is shown policies without auto-apply and no spare caller IDs,
@@ -175,6 +177,7 @@ class Trouble(httpx.BaseTransport):
         self.voice_only = False
         self._lead_features: dict[str, dict[str, str]] = {}
         self.primary: dict[str, str] = {}
+        self.hour_shaped: dict[str, list[tuple[str, Callable[[dict[str, str], int], float]]]] = {}
         self.no_experiments = False
         self._seen = 0
         self._lifted = self._dampened = 0
@@ -279,10 +282,22 @@ class Trouble(httpx.BaseTransport):
                 return {**ev, "connected": False, "engaged": False, "disposition": "no_answer", "duration_s": 0,
                         "turns": 0, "qa": None}
         if ev["type"] == "call":
-            return self._harm(self._set_engagement(self._dull_engagement(self._mute(self._steady_pickup(self._reshape_pickup(ev))))))
+            return self._shape_by_hour(self._harm(self._set_engagement(self._dull_engagement(self._mute(self._steady_pickup(self._reshape_pickup(ev)))))))
         return ev
 
     # Decided from the event ID, or remembered by it: the test oracle reads the same chunks again and must see the same calls.
+    def _shape_by_hour(self, ev: dict) -> dict:
+        for kpi, rate_of in self.hour_shaped.get(ev["workflow_id"], []):
+            happens = ev["event_id"] % 100 < rate_of(self._lead_features[ev["lead_id"]], int(ev["ts"][11:13])) * 100
+            if kpi == "engagement_rate":
+                if ev["connected"]:
+                    ev = {**ev, "engaged": happens, "disposition": "concluded_interested" if happens else "short_hangup"}
+            elif happens:
+                ev = {**ev, "connected": True, "qa": ev["qa"] or {"hallucination_flag": False, "flow_adherence": 1.0}}
+            else:
+                ev = {**ev, "connected": False, "engaged": False, "disposition": "no_answer", "duration_s": 0, "turns": 0, "qa": None}
+        return ev
+
     def _mute(self, ev: dict) -> dict:
         if ev["connected"] and ev["variant"]["voice"] in self.muted.get(ev["workflow_id"], set()) and ev["event_id"] % 4 == 0:
             return {**ev, "connected": False, "engaged": False, "disposition": "no_answer", "duration_s": 0, "turns": 0, "qa": None}

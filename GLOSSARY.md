@@ -134,11 +134,20 @@ A promoted winner becoming worse than its holdback.
 _Avoid_: Fatigue, drift (drift is a change in a KPI with no variant change)
 
 **Rollback**:
-A Proposal that returns a decayed winner's traffic to control.
+A Proposal that undoes one of the controller's own changes after it went wrong: a decayed winner's traffic back to control, or a schedule back to what ran before.
 _Avoid_: Revert (reserved for undoing a supervisor edit)
 
 **Holdback release**:
 Moving the holdback's traffic to the winner after 7 days without a decay signal. It only ever goes out inside another Proposal.
+
+**Hour table**:
+One cohort's weights for every hour of the dialling window. It decides who the dialler picks in an hour, not how many calls it makes.
+
+**History replay**:
+A prediction of what a schedule would have done on history days it wasn't fitted to, with each hour's and each cohort's dials held as they were.
+
+**Before/after check**:
+The single comparison of a workflow's primary KPI in the 3 days after a schedule change with the 3 days before. Confounded by design, so it can only trigger a rollback.
 
 ## Incidents
 

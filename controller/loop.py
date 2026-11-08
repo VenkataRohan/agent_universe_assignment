@@ -2,7 +2,7 @@
 
 Each tick: advance the simulated clock -> ingest every chunk after the cursor -> for each workflow,
 reconcile its Proposals (applying any approval), run the caller-ID check, then experiments, then
-caller-ID exploration. Later tickets add more detection and decisions to `_decide`.
+call-time tuning, then caller-ID exploration. Later tickets add more detection and decisions to `_decide`.
 """
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ from pathlib import Path
 
 import httpx
 
-from . import analysis, callerid, experiments
+from . import analysis, callerid, experiments, schedule
 from .governance import GovernanceClient
 from .ingest import IngestError, Ingestor
 from .registry import OVERLAYS, Overlay
@@ -102,6 +102,7 @@ class Controller:
         # Incidents first, then the dimensions that can move the primary KPI, then exploration (ADR-0007).
         flagged = callerid.check_degraded(self.store, self.sim, self._governance, workflow, now)
         experiments.respond(self.store, self.sim, self._governance, workflow, now)
+        schedule.respond(self.store, self.sim, self._governance, workflow, now)
         callerid.explore(self.store, self.sim, self._governance, workflow, now, flagged)
 
     def _guarded(self, workflow_id: str, now: int, action: Callable[..., None], *args: object) -> None:
