@@ -49,7 +49,7 @@ When a ticket is finished, set its `**Status:**` line to `done` and tick its row
 | 08 | Experiments: confirm and promotion | 07 | [x] |
 | 09 | Decay rollback and holdback release | 08 | [ ] |
 | 10 | Per-cohort call time | 03, 05 | [x] |
-| 11 | Consolidated supervisor view | 06, 08, 10 | [ ] |
+| 11 | Consolidated supervisor view | 06, 08, 10 | [x] |
 | 12 | Loop health and paging | 06 | [ ] |
 | 13 | Crash-recovery evidence | 04 | [ ] |
 | 14 | Load performance on public_03 | 09, 10, 12 | [ ] |
