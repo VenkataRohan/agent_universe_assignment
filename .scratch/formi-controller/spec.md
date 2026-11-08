@@ -185,7 +185,7 @@ It ships as `./run.sh <SIM_URL>`. It resumes cleanly after `kill -9`, and comes 
   - supervisor-edit handling
   - query output
 
-  Where the real simulator can't produce a case (no public scenario has a feature group under 10% of traffic), a scripted world answers the same read API (`ScriptedWorld` in `tests/harness.py`). The controller's ingestion and queries still run for real, and expected values are worked by hand. It touches no scenario file.
+  Where the real simulator can't produce a case (no public scenario has a feature group under 10% of traffic), a scripted world answers the same read API (`ScriptedWorld` in `tests/harness.py`). The controller's ingestion and queries still run for real, and expected values are worked by hand. It touches no scenario file. Where a case must happen on demand against the real simulator (a degraded number, a request expiring, a kill at an exact point, a supervisor edit), `Trouble` in `tests/harness.py` wraps its transport: approvals, config and clock stay real, and only the named events or requests are altered.
 - **Incident behaviour** is tested by running **public_02** end to end, marked `slow`. Tests check that an incident is detected, that a validated fix is proposed with evidence, and that the fix is verified.
 - **Seam 2: the statistics module.** Pure-function tests with synthetic counts. They cover:
   - sample size matching known values

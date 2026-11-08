@@ -3,10 +3,13 @@
     python -m controller --sim-url http://127.0.0.1:8700 --db state/controller.db     # run the loop
     python -m controller health --db state/controller.db                            # read-only
     python -m controller status [workflow] --db state/controller.db                 # read-only
+    python -m controller why <workflow> --at "D3 14:00" --db state/controller.db    # read-only
+    python -m controller heard <lead_id> --db state/controller.db                   # read-only
 """
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import sys
 import time
@@ -14,7 +17,7 @@ from pathlib import Path
 
 import httpx
 
-from . import queries
+from . import queries, simtime
 from .loop import Controller, ResumeRefused
 
 
@@ -31,12 +34,23 @@ def main(argv: list[str] | None = None) -> int:
     st = sub.add_parser("status", help="each workflow's analysis partition and history baselines")
     st.add_argument("workflow", nargs="?", help="just this workflow (default: all)")
     st.add_argument("--db", default=argparse.SUPPRESS)
+    w = sub.add_parser("why", help="the change in force at a moment: Proposal, evidence, approval, aftermath")
+    w.add_argument("workflow")
+    w.add_argument("--at", required=True, help='a simulated time, e.g. "D3 14:00"')
+    w.add_argument("--db", default=argparse.SUPPRESS)
+    hd = sub.add_parser("heard", help="every call one lead received, and why that config was live")
+    hd.add_argument("lead_id")
+    hd.add_argument("--db", default=argparse.SUPPRESS)
     a = ap.parse_args(argv)
 
     if a.cmd == "health":
         return _health(Path(a.db))
     if a.cmd == "status":
         return _status(Path(a.db), a.workflow)
+    if a.cmd == "why":
+        return _why(Path(a.db), a.workflow, a.at)
+    if a.cmd == "heard":
+        return _heard(Path(a.db), a.lead_id)
     if not a.sim_url:
         ap.error("--sim-url is required to run the loop")
     return _run(a.sim_url, Path(a.db), a.fresh_if_mismatch)
@@ -78,10 +92,10 @@ def _health(db: Path) -> int:
         return 0
     rows = [
         ("scenario", h["scenario"]),
-        ("cursor", f"chunk {h['cursor_chunk']}, ingested through {_sim_time(h['ingested_through_minute'])}"
+        ("cursor", f"chunk {h['cursor_chunk']}, ingested through {simtime.label(h['ingested_through_minute'])}"
                    f" (minute {h['ingested_through_minute']})"),
         ("events ingested", f"{h['events_ingested']} (last event_id {h['last_event_id']})"),
-        ("ingest lag", f"{h['ingest_lag_ticks']:g} ticks (simulator at {_sim_time(h['sim_minute_seen'])})"
+        ("ingest lag", f"{h['ingest_lag_ticks']:g} ticks (simulator at {simtime.label(h['sim_minute_seen'])})"
                        + (f"; last ingest {h['seconds_since_last_ingest']}s ago"
                           if h["seconds_since_last_ingest"] is not None else "")),
     ]
@@ -121,13 +135,84 @@ def _print_workflow_status(w: dict) -> None:
               f"{w['primary_kpi']} {_pct(h['primary_kpi_rate'])}")
 
 
+def _why(db: Path, workflow: str, at: str) -> int:
+    if not db.exists():
+        print(f"controller: no store at {db}", file=sys.stderr)
+        return 1
+    try:
+        w = queries.why(db, workflow, queries.minute_at(db, at))
+    except (KeyError, ValueError) as e:
+        print(f"controller: {e.args[0]}", file=sys.stderr)
+        return 1
+    c = w["change"]
+    print(f"{workflow} at {w['at']}: config version {w['config_version']}")
+    print(f"  change      {c['actor']} at {c['applied_at'] or 'start'}"
+          f"{'; changed ' + ', '.join(c['changed_dims']) if c['changed_dims'] else ''}")
+    p = w["proposal"]
+    if p is None:
+        print("  proposal    none: the controller did not make this change")
+    else:
+        print(f"  proposal    {p['proposal_id']} ({p['status']}): {p['change_summary']}")
+        print(f"  rationale   {p['rationale']}")
+        print(f"  impact      score {p['impact_score']:.2f}, {p['affected_leads']:,} leads affected")
+        print(f"  diff        {json.dumps(p['diff'], sort_keys=True)}")
+        print(f"  dry run     {json.dumps(p['dry_run']['overall'], sort_keys=True)}; "
+              f"cohorts at risk: {', '.join(p['dry_run']['cohorts_at_risk']) or 'none'}")
+        print(f"  evidence    {json.dumps(w['evidence'], sort_keys=True)}")
+    a = w["approval"]
+    if a is not None:
+        print(f"  approval    {a['approval_id']}: {a['status']} by the client's approver at {a['decided_at']}"
+              f"{'; ' + '; '.join(a['reasons']) if a['reasons'] else ''}")
+    after = w["aftermath"]
+    print(f"  aftermath   this version: {_version_line(after['under_this_version'])}")
+    if after["under_previous_version"] is not None:
+        print(f"              version before: {_version_line(after['under_previous_version'])}")
+    n = after["next_change"]
+    print(f"              next change: {'none' if n is None else 'version ' + str(n['version']) + ' by ' + n['actor'] + ' at ' + n['applied_at']}")
+    print("  decisions")
+    for d in w["decisions"]:
+        print(f"    {simtime.label(d['minute'])}  {d['kind']:<10}{d['outcome']:<22}{d['proposal_id'] or ''}"
+              f"{_decision_reason(d['detail'])}")
+    return 0
+
+
+def _decision_reason(detail: dict) -> str:
+    """Why a decision came out as it did, for the kinds of decision that have a reason to give."""
+    for key in ("hold", "why", "reasons", "error", "violations"):
+        if detail.get(key):
+            return f"  ({detail[key]})"
+    return ""
+
+
+def _version_line(k: dict) -> str:
+    return (f"{k['dials']:,} dials, pickup {_pct(k['pickup_rate'])}, engagement {_pct(k['engagement_rate'])}; pickup by "
+            f"caller ID {', '.join(f'{c} {_pct(r)}' for c, r in sorted(k['pickup_by_caller_id'].items())) or 'none'}")
+
+
+def _heard(db: Path, lead_id: str) -> int:
+    if not db.exists():
+        print(f"controller: no store at {db}", file=sys.stderr)
+        return 1
+    h = queries.heard(db, lead_id)
+    if not h["calls"]:
+        print(f"controller: no calls recorded for lead {lead_id}", file=sys.stderr)
+        return 1
+    print(f"{lead_id}  (workflow {h['workflow_id']}, {len(h['calls'])} calls)")
+    for call in h["calls"]:
+        v, cfg = call["variant"], call["config"]
+        print(f"  {call['ts']}  attempt {call['attempt_no']}  {call['disposition']}")
+        print(f"    heard   welcome_message {v['welcome_message']}, voice {v['voice']}, caller_id {v['caller_id']}, "
+              f"prompt_version {v['prompt_version']} (cohort {call['cohort_id']})")
+        print(f"    config  version {cfg['version']}, live since {cfg['applied_at'] or 'start'}, set by {cfg['actor']}"
+              f"{', Proposal ' + cfg['proposal_id'] if cfg['proposal_id'] else ''}"
+              f"{', Approval ' + cfg['approval_id'] if cfg['approval_id'] else ''}")
+        if cfg["change_summary"]:
+            print(f"    because {cfg['change_summary']}")
+    return 0
+
+
 def _pct(rate: float | None) -> str:
     return "n/a" if rate is None else f"{rate:.1%}"
-
-
-def _sim_time(minute: int) -> str:
-    day, m = divmod(minute, 1440)
-    return f"D{day} {m // 60:02d}:{m % 60:02d}"
 
 
 if __name__ == "__main__":

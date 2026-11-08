@@ -19,12 +19,12 @@ Spec: user stories 41, 45–46, 50–56, 58–60, 63–66, 70–72; ADR-0002.
 
 **Blocked by:** 01, 02, 03
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] On public_02, a degraded caller ID is detected and an approval-path Proposal shifting weight off it is approved and applied
-- [ ] Killing the controller between recording and sending a Proposal, then restarting, sends it exactly once
-- [ ] Killing between approval and apply, then restarting, applies it exactly once (confirmed via config history)
-- [ ] No request is ever sent outside effective approver hours, nor to Kestrel before 11:00 or beyond 2 per 24 hours
-- [ ] An expired Proposal produces a new Proposal (new ID) built from fresh data, never a resubmission
-- [ ] A supervisor edit makes a pending Proposal stale and any rebuilt Proposal preserves the supervisor's change
-- [ ] `controller why` shows change, Proposal, evidence, approval and aftermath; `controller heard` shows each call's exact variant and why that config was live
+- [x] On public_02, a degraded caller ID is detected and an approval-path Proposal shifting weight off it is approved and applied
+- [x] Killing the controller between recording and sending a Proposal, then restarting, sends it exactly once
+- [x] Killing between approval and apply, then restarting, applies it exactly once (confirmed via config history)
+- [x] No request is ever sent outside effective approver hours, nor to Kestrel before 11:00 or beyond 2 per 24 hours
+- [x] An expired Proposal produces a new Proposal (new ID) built from fresh data, never a resubmission
+- [x] A supervisor edit makes a pending Proposal stale and any rebuilt Proposal preserves the supervisor's change
+- [x] `controller why` shows change, Proposal, evidence, approval and aftermath; `controller heard` shows each call's exact variant and why that config was live

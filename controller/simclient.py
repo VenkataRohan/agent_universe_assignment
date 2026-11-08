@@ -20,6 +20,11 @@ class SimError(Exception):
         super().__init__(f"{status} {code}: {detail}")
         self.status, self.code, self.detail = status, code, detail
 
+    @property
+    def retryable(self) -> bool:
+        """It may succeed if tried again: a server error, or the request may never have arrived."""
+        return self.status == 0 or self.status >= 500
+
 
 class SimClient:
     def __init__(self, http: httpx.Client, retries: int = 5, backoff_s: float = 0.5,
@@ -36,6 +41,15 @@ class SimClient:
     def workflows(self) -> list[dict]:
         return self._json("GET", "/workflows")
 
+    def config(self, workflow_id: str) -> dict:
+        return self._json("GET", f"/workflows/{workflow_id}/config")
+
+    def config_history(self, workflow_id: str) -> list[dict]:
+        return self._json("GET", f"/workflows/{workflow_id}/config/history")
+
+    def approvals(self, workflow_id: str) -> list[dict]:
+        return self._json("GET", "/approvals", params={"workflow_id": workflow_id})
+
     def list_chunks(self, kind: str, after: int = -1) -> list[dict]:
         return self._json("GET", "/events/chunks", params={"kind": kind, "after": after})
 
@@ -50,6 +64,21 @@ class SimClient:
                 r.read()
                 raise _as_error(r)
             yield from r.iter_lines()
+
+    # -- governance ----------------------------------------------------------------------------
+    def request_approval(self, body: dict) -> dict:
+        """Safe to retry: `proposal_id` is the idempotency key, a repeat answers 409 duplicate_proposal_id."""
+        return self._json("POST", "/approvals", json=body)
+
+    def apply_approval(self, workflow_id: str, approval_id: str) -> dict:
+        """One attempt only. After a failure the caller must look in config history before trying again."""
+        try:
+            r = self._http.request("POST", f"/workflows/{workflow_id}/apply", json={"approval_id": approval_id})
+        except httpx.TransportError as e:
+            raise SimError(0, "transport_error", str(e)) from e
+        if r.status_code >= 400:
+            raise _as_error(r)
+        return r.json()
 
     # -- time ----------------------------------------------------------------------------------
     def advance_to(self, target_minute: int) -> dict:

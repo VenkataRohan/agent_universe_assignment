@@ -119,3 +119,101 @@ def scripted_client(primary: str, calls: list[ScriptedCalls]) -> httpx.Client:
 def faulty_client(client: httpx.Client, **kw) -> tuple[httpx.Client, ChunkFaults]:
     faults = ChunkFaults(client._transport, **kw)  # type: ignore[attr-defined]
     return httpx.Client(transport=faults, base_url=client.base_url), faults
+
+
+class Killed(Exception):
+    """The controller process dying at an injected point. Nothing in the controller may catch it."""
+
+
+class Trouble(httpx.BaseTransport):
+    """The real simulator, with scripted trouble around it. No scenario file is involved.
+
+    - `degrade`: workflow -> caller ID whose calls mostly go unanswered (live calls only, unless
+      `degrade_history`). The simulator's own ground truth is untouched; only the events are rewritten.
+    - `kill(...)`: die at the next matching request, before it reaches the simulator or after.
+    - `lost_response(...)`: the next matching request reaches the simulator but answers 503.
+    - `refuse(...)`: the next matching request never arrives and is answered with this 4xx.
+    - `ttl_hours`: every approval request asks for this expiry, so it expires before an approver sees it.
+    - `blank_summary`: every approval request goes out empty-summaried, so the approver must reject it.
+    - Any config change whose proposal_id starts with `supervisor-` reads back as a supervisor edit.
+      The simulator has no API for those, so a test makes one with PUT and this relabels it.
+    """
+
+    def __init__(self, inner: httpx.BaseTransport, degrade: dict[str, str] | None = None, degrade_history: bool = False):
+        self._inner, self._degrade, self._degrade_history = inner, degrade or {}, degrade_history
+        self._kill: tuple[str, str, bool] | None = None
+        self._lost: tuple[str, str] | None = None
+        self._refuse: tuple[str, str, int, str] | None = None
+        self.ttl_hours: float | None = None
+        self.blank_summary = False
+        self._seen = 0
+
+    def kill(self, method: str, path_end: str, after_forward: bool = False) -> None:
+        self._kill = (method, path_end, after_forward)
+
+    def lost_response(self, method: str, path_end: str) -> None:
+        self._lost = (method, path_end)
+
+    def refuse(self, method: str, path_end: str, status: int, code: str) -> None:
+        self._refuse = (method, path_end, status, code)
+
+    def handle_request(self, request: httpx.Request) -> httpx.Response:
+        method, path = request.method, request.url.path
+        request = self._rewrite_request(request)
+        if self._refuse is not None and method == self._refuse[0] and path.endswith(self._refuse[1]):
+            status, code = self._refuse[2:]
+            self._refuse = None
+            return httpx.Response(status, json={"error": code})
+        armed = self._kill is not None and method == self._kill[0] and path.endswith(self._kill[1])
+        if armed and not self._kill[2]:  # type: ignore[index]
+            self._kill = None
+            raise Killed(f"before {method} {path}")
+        resp = self._inner.handle_request(request)
+        if armed:
+            self._kill = None
+            resp.read()
+            raise Killed(f"after {method} {path}")
+        if self._lost is not None and method == self._lost[0] and path.endswith(self._lost[1]):
+            self._lost = None
+            resp.read()
+            return httpx.Response(503, json={"error": "unavailable"})
+        if path.startswith("/events/chunks/") and (self._degrade_history or not path.endswith("/0")):
+            resp.read()
+            lines = [self._rewrite_event(json.loads(l)) for l in resp.text.splitlines() if l]
+            return httpx.Response(200, content="\n".join(json.dumps(l) for l in lines).encode())
+        if path.endswith("/config/history"):
+            resp.read()
+            return httpx.Response(200, json=[self._relabel(e) for e in resp.json()])
+        return resp
+
+    def _rewrite_request(self, request: httpx.Request) -> httpx.Request:
+        if request.method != "POST" or request.url.path != "/approvals":
+            return request
+        body = json.loads(request.content)
+        if self.ttl_hours is not None:
+            body["expires_in_hours"] = self.ttl_hours
+        if self.blank_summary:
+            body["change_summary"] = ""
+        return httpx.Request("POST", request.url, json=body)
+
+    @staticmethod
+    def _relabel(ev: dict) -> dict:
+        if str(ev.get("proposal_id") or "").startswith("supervisor-"):
+            return {**ev, "actor": "supervisor", "proposal_id": None}
+        return ev
+
+    def _rewrite_event(self, ev: dict) -> dict:
+        if ev["type"] == "config_changed":
+            return self._relabel(ev)
+        if ev["type"] == "call" and ev["connected"] and ev["variant"]["caller_id"] == self._degrade.get(ev["workflow_id"]):
+            self._seen += 1
+            if self._seen % 5:  # four in five of its answered calls never connect
+                return {**ev, "connected": False, "engaged": False, "disposition": "no_answer", "duration_s": 0,
+                        "turns": 0, "qa": None}
+        return ev
+
+
+def troubled_client(client: httpx.Client, degrade: dict[str, str] | None = None,
+                    degrade_history: bool = False) -> tuple[httpx.Client, Trouble]:
+    trouble = Trouble(client._transport, degrade, degrade_history)  # type: ignore[attr-defined]
+    return httpx.Client(transport=trouble, base_url=client.base_url), trouble

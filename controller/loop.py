@@ -1,18 +1,22 @@
 """Loop: one process, one thread, one 15-minute tick at a time.
 
-Each tick: advance the simulated clock -> ingest every chunk after the cursor. Later tickets add
-reconcile/apply, detection, decisions and proposals to `step()`.
+Each tick: advance the simulated clock -> ingest every chunk after the cursor -> for each workflow,
+reconcile its Proposals (applying any approval) and run the caller-ID check. Later tickets add more
+detection and decisions to `_decide`.
 """
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable, Mapping
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
 import httpx
 
-from . import analysis
+from . import analysis, callerid
+from .governance import GovernanceClient
 from .ingest import IngestError, Ingestor
+from .registry import OVERLAYS, Overlay
 from .simclient import SimClient, SimError
 from .store import Store
 
@@ -25,10 +29,13 @@ class ResumeRefused(Exception):
 
 
 class Controller:
-    def __init__(self, http: httpx.Client, db_path: str | Path):
+    def __init__(self, http: httpx.Client, db_path: str | Path, overlays: Mapping[str, Overlay] = OVERLAYS):
         self.sim = SimClient(http)
         self.store = Store(db_path)
+        self._overlays = overlays
         self._ingestor: Ingestor | None = None
+        self._governance: GovernanceClient | None = None
+        self._workflows: list[dict] = []
         self._state: dict = {}
 
     @property
@@ -56,6 +63,12 @@ class Controller:
         self._state = st
         self._catch_up()
         analysis.bootstrap_from_history(self.store, workflows)
+        self._workflows = workflows
+        self._governance = GovernanceClient(self.store, self.sim, workflows, self._overlays)
+        # A Proposal left half-done by an earlier life must not wait for the next tick.
+        for w in workflows:
+            self._guarded(w["workflow_id"], self._state["sim_minute"], self._governance.reconcile,
+                          w["workflow_id"], self._state["sim_minute"])
 
     def step(self) -> bool:
         """Advance one tick and ingest what it produced. Returns True once the scenario is finished."""
@@ -66,6 +79,8 @@ class Controller:
         self._state = self.sim.advance_to(self._state["sim_minute"] + self._state["tick_minutes"])
         self.store.record_sim_minute(self._state["sim_minute"])
         self._catch_up()
+        if not self._state["finished"]:
+            self._decide(self._state["sim_minute"])
         return bool(self._state["finished"])
 
     def run(self) -> None:
@@ -75,6 +90,25 @@ class Controller:
 
     def close(self) -> None:
         self.store.close()
+
+    # -- deciding ------------------------------------------------------------------------------
+    def _decide(self, now: int) -> None:
+        for w in self._workflows:
+            self._guarded(w["workflow_id"], now, self._decide_workflow, w, now)
+
+    def _decide_workflow(self, workflow: dict, now: int) -> None:
+        assert self._governance is not None
+        self._governance.reconcile(workflow["workflow_id"], now)
+        callerid.check(self.store, self.sim, self._governance, workflow, now)
+
+    def _guarded(self, workflow_id: str, now: int, action: Callable[..., None], *args: object) -> None:
+        """One workflow's trouble with the simulator is a recorded outcome, never the loop's end."""
+        try:
+            action(*args)
+        except SimError as e:
+            log.warning("%s: decide step failed: %s", workflow_id, e)
+            with self.store.transaction() as conn:
+                Store.record_decision(conn, now, workflow_id, "loop", "error", None, {"error": str(e)})
 
     # -- ingestion -----------------------------------------------------------------------------
     def _catch_up(self) -> None:

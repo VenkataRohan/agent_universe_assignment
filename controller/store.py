@@ -15,6 +15,10 @@ Written once per workflow, after history is in (see `analysis`):
 - workflow_analysis  the workflow's primary KPI, its partition's feature and its history baselines
 - cohorts            the cohorts of each workflow's analysis partition (`default` included)
 - cohort_hour_rates  per cohort and hour, the primary KPI from history, adjusted for attempt number
+
+Written by the governance client and the decide steps:
+- proposals  the controller's record of each config change it wants, committed before anything is sent
+- decisions  every decide step's outcome and inputs, including "did nothing"
 """
 from __future__ import annotations
 
@@ -23,7 +27,9 @@ import sqlite3
 import time
 from collections.abc import Iterator
 from contextlib import contextmanager
+from datetime import date
 from pathlib import Path
+from typing import Any
 
 from .cohorts import Cohort, Partition
 
@@ -132,6 +138,37 @@ CREATE TABLE IF NOT EXISTS cohort_hour_rates (
     adjusted_rate REAL    NOT NULL,
     PRIMARY KEY (workflow_id, cohort_id, hour)
 ) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS proposals (
+    proposal_id     TEXT PRIMARY KEY,
+    workflow_id     TEXT    NOT NULL,
+    kind            TEXT    NOT NULL,
+    seq             INTEGER NOT NULL,
+    status          TEXT    NOT NULL,
+    base_version    INTEGER NOT NULL,
+    body            TEXT    NOT NULL,   -- the POST /approvals body, exactly as it is sent
+    replaces        TEXT,               -- the Proposal this one was rebuilt from
+    created_minute  INTEGER NOT NULL,
+    sent_minute     INTEGER,            -- counts against the request cap; NULL if it never reached the platform
+    approval_id     TEXT,
+    expires_at      TEXT,
+    apply_by        TEXT,
+    decided_minute  INTEGER,            -- the tick the decision was seen
+    applied_minute  INTEGER,
+    applied_version INTEGER,
+    reasons         TEXT,               -- JSON list: the approver's reasons, or why it was abandoned
+    UNIQUE (workflow_id, kind, seq)
+);
+CREATE INDEX IF NOT EXISTS proposals_by_status ON proposals (workflow_id, status);
+CREATE TABLE IF NOT EXISTS decisions (
+    decision_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    minute      INTEGER NOT NULL,
+    workflow_id TEXT    NOT NULL,
+    kind        TEXT    NOT NULL,
+    outcome     TEXT    NOT NULL,
+    proposal_id TEXT,
+    detail      TEXT    NOT NULL   -- JSON: the inputs the decision was made from
+);
+CREATE INDEX IF NOT EXISTS decisions_by_wf ON decisions (workflow_id, minute);
 """
 
 
@@ -179,6 +216,9 @@ class Store:
 
     def close(self) -> None:
         self.conn.close()
+
+    def d0(self) -> date:
+        return date.fromisoformat(self.conn.execute("SELECT d0_date FROM run").fetchone()[0])
 
     @staticmethod
     def history_call_counts(conn: sqlite3.Connection, workflow_id: str) -> list[sqlite3.Row]:
@@ -241,3 +281,63 @@ class Store:
             "UPDATE run SET cursor_chunk = ?, ingested_through_minute = MAX(ingested_through_minute, ?), "
             "events_ingested = events_ingested + ?, last_event_id = MAX(last_event_id, ?), updated_at = ?",
             (chunk, until_minute, events, last_event_id, time.time()))
+
+    # -- proposals and decisions (written only here) ---------------------------------------------
+    @staticmethod
+    def next_proposal_seq(conn: sqlite3.Connection, workflow_id: str, kind: str) -> int:
+        return conn.execute("SELECT COALESCE(MAX(seq), 0) + 1 FROM proposals WHERE workflow_id = ? AND kind = ?",
+                            (workflow_id, kind)).fetchone()[0]
+
+    @staticmethod
+    def insert_proposal(conn: sqlite3.Connection, **row: Any) -> None:
+        conn.execute(f"INSERT INTO proposals ({', '.join(row)}) VALUES ({', '.join('?' * len(row))})",
+                     tuple(row.values()))
+
+    @staticmethod
+    def update_proposal(conn: sqlite3.Connection, proposal_id: str, **fields: Any) -> None:
+        conn.execute(f"UPDATE proposals SET {', '.join(f'{k} = ?' for k in fields)} WHERE proposal_id = ?",
+                     (*fields.values(), proposal_id))
+
+    @staticmethod
+    def record_decision(conn: sqlite3.Connection, minute: int, workflow_id: str, kind: str, outcome: str,
+                        proposal_id: str | None, detail: dict) -> None:
+        """Call inside the transaction of the state change the decision causes."""
+        conn.execute("INSERT INTO decisions (minute, workflow_id, kind, outcome, proposal_id, detail) "
+                     "VALUES (?,?,?,?,?,?)",
+                     (minute, workflow_id, kind, outcome, proposal_id, json.dumps(detail, sort_keys=True)))
+
+    def proposal(self, proposal_id: str) -> sqlite3.Row:
+        return self.conn.execute("SELECT * FROM proposals WHERE proposal_id = ?", (proposal_id,)).fetchone()
+
+    def open_proposals(self, workflow_id: str, statuses: tuple[str, ...]) -> list[sqlite3.Row]:
+        marks = ",".join("?" * len(statuses))
+        return self.conn.execute(f"SELECT * FROM proposals WHERE workflow_id = ? AND status IN ({marks}) "
+                                 "ORDER BY created_minute, seq", (workflow_id, *statuses)).fetchall()
+
+    def latest_proposal(self, workflow_id: str, kind: str) -> sqlite3.Row | None:
+        return self.conn.execute("SELECT * FROM proposals WHERE workflow_id = ? AND kind = ? ORDER BY seq DESC LIMIT 1",
+                                 (workflow_id, kind)).fetchone()
+
+    def requests_since(self, workflow_id: str, minute: int, excluding: str | None = None) -> int:
+        """Requests sent to the platform at or after `minute`, whatever became of them."""
+        return self.conn.execute("SELECT COUNT(*) FROM proposals WHERE workflow_id = ? AND sent_minute >= ? "
+                                 "AND proposal_id IS NOT ?", (workflow_id, minute, excluding)).fetchone()[0]
+
+    # -- what the decide steps read --------------------------------------------------------------
+    def caller_id_counts(self, workflow_id: str, first_hour: int, last_hour: int) -> list[sqlite3.Row]:
+        """Per caller ID and feature cell, call counters between two hours since D0 (inclusive)."""
+        return self.conn.execute(
+            "SELECT v.caller_id caller_id, lang, city_tier, age_band, value_band, SUM(a.dials) dials, "
+            "SUM(a.connected) connected, SUM(a.engaged) engaged "
+            "FROM cell_agg a JOIN variants v USING (variant_id) JOIN feature_cells USING (cell_id) "
+            "WHERE a.workflow_id = ?1 AND a.day BETWEEN ?2 AND ?3 AND a.day * 24 + a.hour BETWEEN ?4 AND ?5 "
+            "GROUP BY v.caller_id, a.cell_id",
+            (workflow_id, first_hour // 24, last_hour // 24, first_hour, last_hour)).fetchall()
+
+    def active_leads_by_cell(self, workflow_id: str, first_active_day: int) -> list[sqlite3.Row]:
+        """Per feature cell, the leads of campaigns created since that day."""
+        return self.conn.execute(
+            "SELECT lang, city_tier, age_band, value_band, COUNT(*) leads "
+            "FROM leads l JOIN campaigns c USING (campaign_id) JOIN feature_cells USING (cell_id) "
+            "WHERE c.workflow_id = ?1 AND c.created_day >= ?2 "
+            "GROUP BY l.cell_id", (workflow_id, first_active_day)).fetchall()
