@@ -1,15 +1,15 @@
 # Crash-recovery log — public_02_incidents
 
-Run 2026-11-09 01:56, seed 11. The controller (`./run.sh`) was SIGKILLed at random points and restarted with the same command; each restart resumed from the store. An uninterrupted run took 55 s.
+Run 2026-11-09 02:35, seed 15. The controller (`./run.sh`) was SIGKILLed at random points and restarted with the same command; each restart resumed from the store. An uninterrupted run took 55 s.
 
 ## Kills and restarts
 
 | life | started | killed at | after (s) | simulated minute | in flight at the kill | restarted at | exit |
 |---|---|---|---|---|---|---|---|
-| 1 | 01:55:24 | 01:55:50 | 25.6 | 7050 | none | 01:55:50 | SIGKILL |
-| 2 | 01:55:50 | 01:55:55 | 30.4 | 8175 | 1 pending | 01:55:55 | SIGKILL |
-| 3 | 01:55:55 | 01:56:11 | 46.6 | 11760 | none | 01:56:11 | SIGKILL |
-| 4 | 01:56:11 | — | — | — | — | — | 0 |
+| 1 | 02:34:23 | 02:34:29 | 6.1 | 870 | 1 pending | 02:34:29 | SIGKILL |
+| 2 | 02:34:29 | 02:35:01 | 38.2 | 10185 | none | 02:35:01 | SIGKILL |
+| 3 | 02:35:01 | 02:35:11 | 48.4 | 12645 | none | 02:35:11 | SIGKILL |
+| 4 | 02:35:11 | — | — | — | — | — | 0 |
 
 ## Checks
 
