@@ -137,7 +137,39 @@ def _status(db: Path, workflow: str | None) -> int:
         if i:
             print()
         _print_workflow_status(w)
+        sup = queries.supervisor(db, w["workflow_id"])
+        if workflow:
+            _print_supervisor(sup)
+        elif sup is not None:
+            print(f"  summary     {len(sup['pending'])} awaiting approval, {len(sup['testing'])} being tested, "
+                  f"{len(sup['changes_today'])} changed today, {len(sup['incidents'])} incidents; "
+                  f"`controller status {w['workflow_id']}` for the detail")
     return 0
+
+
+def _print_supervisor(s: dict | None) -> None:
+    if s is None:
+        return
+    print(f"  as of {s['now']}")
+    print("  needs your approval" + ("" if s["pending"] else ": nothing"))
+    for p in s["pending"]:
+        print(f"    {p['proposal_id']}  impact {p['impact_score'] or 0:.2f}  {p['what']}"
+              f"{'  [incident response]' if p['incident_response'] else ''}")
+    print("  being tested" + ("" if s["testing"] else ": nothing"))
+    for e in s["testing"]:
+        print(f"    {e['experiment_id']} ({e['status'].replace('_', ' ')}): "
+              + "; ".join(f"{d} {v}" for d, v in e["design"].items())
+              + (f"; leading: {', '.join(f'{d} {o}' for d, o in sorted(e['candidates'].items()))}" if e["candidates"] else ""))
+    for i in s["incidents"]:
+        print(f"  incident    {_incident_line(i)}")
+    print("  changed today" + ("" if s["changes_today"] else ": nothing"))
+    for c in s["changes_today"]:
+        how = ("auto-applied as incident response" if c["route"] != "approval" else "applied as incident response") \
+            if c["incident_response"] else "applied"
+        print(f"    {c['at']}  {c['what']}  [{how}]")
+    print("  chose not to act" + ("" if s["not_acted"] else ": nothing"))
+    for n in s["not_acted"]:
+        print(f"    {n['at']}  {n['what']}{'  (' + n['reason'] + ')' if n['reason'] else ''}")
 
 
 def _print_workflow_status(w: dict) -> None:

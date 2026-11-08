@@ -6,7 +6,7 @@ Spec: user stories 18, 72–73.
 
 **Blocked by:** 06, 08, 10
 
-**Status:** ready-for-agent
+**Status:** done
 
 - [ ] On a finished public_02 run, `controller status ks_cancel` shows the incident, its fix and today's changes on one screen
 - [ ] Pending Proposals are listed with impact score, ordered by it

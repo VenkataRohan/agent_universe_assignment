@@ -465,3 +465,86 @@ def heard(db: str | Path, lead_id: str) -> dict:
         {**call, "config": {**changes[call["config_version"]],
                             "change_summary": summaries.get(changes[call["config_version"]]["proposal_id"])}}
         for call in calls]}
+
+
+# -- supervisor: the single screen -----------------------------------------------------------------
+_NOT_ACTED = ("held", "blocked", "dropped", "too_few_connects", "nothing_to_test", "already_escalated",
+              "recently_cleared", "not_applicable", "already_in_place")
+_NOT_ACTED_SHOWN = 8
+_CLOSED_PROPOSALS = ("rejected", "refused", "expired", "withdrawn", "failed")
+
+
+def supervisor(db: str | Path, workflow_id: str) -> dict | None:
+    """What a supervisor needs for one workflow: what's tested, what needs approval, today's changes, what wasn't acted on.
+
+    None if the controller has not analysed the workflow. Cohort ids in change text are replaced by plain names.
+    """
+    try:
+        conn = connect(db, readonly=True)
+    except sqlite3.OperationalError:  # no store yet
+        return None
+    try:
+        run = conn.execute("SELECT sim_minute_seen FROM run").fetchone()
+        part = load_partition(conn, workflow_id)
+    except sqlite3.OperationalError:
+        return None
+    finally:
+        conn.close()
+    if run is None or part is None:
+        return None
+    now = run[0]
+    today = now // simtime.MINUTES_PER_DAY
+    names = {c.id: c.name for c in part.cohorts}
+
+    def plain(text: str) -> str:
+        for cid in sorted(names, key=len, reverse=True):
+            text = text.replace(cid, names[cid])
+        return text
+
+    props = proposals(db, workflow_id)
+
+    def entry(p: dict) -> dict:
+        return {"proposal_id": p["proposal_id"], "status": p["status"], "what": plain(p["change_summary"]),
+                "why": plain(p.get("rationale") or ""), "impact_score": p.get("impact_score"),
+                "incident_response": p["incident_response"], "route": p["route"]}
+
+    pending = sorted((entry(p) for p in props if p["status"] in ("pending", "submitting")),
+                     key=lambda e: -(e["impact_score"] or 0))
+    changes_today = [{**entry(p), "at": simtime.label(p["applied_minute"])} for p in props
+                     if p["applied_minute"] is not None and p["applied_minute"] // simtime.MINUTES_PER_DAY == today]
+    exps = experiments(db, workflow_id)
+    testing = [e for e in exps if e["end_minute"] is None]
+    not_acted: list[dict] = []
+    for e in exps:
+        if e["status"] == "inconclusive":
+            not_acted.append({"minute": e["end_minute"], "what": f"Experiment {e['experiment_id']} ended inconclusive",
+                              "reason": plain(str(e["end_reason"]).replace("_", " "))})
+    for d in decisions(db, workflow_id):
+        if d["outcome"].endswith(_NOT_ACTED):
+            not_acted.append({"minute": d["minute"], "what": f"{d['kind'].replace('_', ' ')}: {d['outcome'].replace('_', ' ')}",
+                              "reason": plain(str(_reason_of(d["detail"])))})
+    for p in props:
+        if p["status"] in _CLOSED_PROPOSALS:
+            not_acted.append({"minute": p["decided_minute"] or p["created_minute"],
+                              "what": f"Proposal {p['proposal_id']} {p['status']}: {plain(p['change_summary'])}",
+                              "reason": plain("; ".join(p["reasons"]))})
+    not_acted.sort(key=lambda n: -(n["minute"] or 0))
+    seen, deduped = set(), []
+    for n in not_acted:  # a held decision repeats every loop; show each distinct one once, latest first
+        key = (n["what"], n["reason"])
+        if key not in seen:
+            seen.add(key)
+            deduped.append({**n, "at": simtime.label(n["minute"] or 0)})
+    return {"workflow_id": workflow_id, "now": simtime.label(now), "pending": pending, "changes_today": changes_today,
+            "testing": [{"experiment_id": e["experiment_id"], "status": e["status"],
+                         "candidates": {d: o for d, o in (e["candidates"] or {}).items()},
+                         "design": {d: plain(f"{p['control']} against {', '.join(p['challengers'])}")
+                                    for d, p in sorted(e["design"]["dimensions"].items())}} for e in testing],
+            "incidents": incidents(db, workflow_id), "not_acted": deduped[:_NOT_ACTED_SHOWN]}
+
+
+def _reason_of(detail: dict) -> object:
+    for key in ("hold", "why", "reason", "reasons", "violations"):
+        if detail.get(key):
+            return detail[key]
+    return ""
