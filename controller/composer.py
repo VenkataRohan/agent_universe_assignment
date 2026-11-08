@@ -11,6 +11,7 @@ from dataclasses import dataclass
 
 ALLOCATION_DIMS = ("welcome_message", "voice", "caller_id")
 MAX_COHORTS = 20
+_ROUNDING_MARGIN = 1e-5  # rounded weights must not land a capped move just over its limit
 
 Intent = Callable[[dict], None]  # edits a proposed config in place
 
@@ -33,26 +34,76 @@ def compose(current: Mapping, *intents: Intent) -> Composed:
     return Composed(current["version"], current["config"], proposed, diff, tuple(sorted(diff)))
 
 
-def move_off_caller_ids(degraded: Collection[str]) -> Intent:
-    """Take all weight off `degraded`, sharing it among the numbers each allocation already uses."""
+def move_off_caller_ids(degraded: Collection[str], unproven: Collection[str] = (), limit: float | None = None) -> Intent:
+    """Take weight off `degraded`, sharing it among the proven numbers each allocation already uses.
+
+    An `unproven` number keeps exactly the share it has: moving weight must never raise an untested number.
+    `limit` caps how much of an allocation moves; without one, all of the degraded numbers' weight goes.
+    """
     def intent(config: dict) -> None:
         allocations = config["allocations"]
-        fallback = _healthy(allocations.get("default", {}).get("caller_id", {}), degraded)
+        fallback = _receivers(_shares(allocations.get("default", {}).get("caller_id", {})), degraded, unproven)
         for cohort, dims in allocations.items():
-            dist = dims.get("caller_id")
-            if not dist or not any(dist.get(c, 0) > 0 for c in degraded):
+            shares = _shares(dims.get("caller_id") or {})
+            leaving = sum(s for c, s in shares.items() if c in degraded)
+            if not leaving:
                 continue
-            healthy = _healthy(dist, degraded)
-            if healthy:
-                total = sum(healthy.values())
-                dims["caller_id"] = {c: round(w / total, 6) for c, w in healthy.items()}
-            elif cohort != "default" and fallback:
+            receivers = _receivers(shares, degraded, unproven)
+            if receivers:
+                moved = leaving if limit is None else min(leaving, max(limit - _ROUNDING_MARGIN, 0.0))
+                dims["caller_id"] = _moved(shares, degraded, receivers, leaving, moved)
+            elif cohort != "default" and fallback and limit is None:
                 del dims["caller_id"]  # a cohort with no caller-ID table of its own uses default's
     return intent
 
 
-def _healthy(dist: Mapping[str, float], degraded: Collection[str]) -> dict[str, float]:
-    return {c: w for c, w in dist.items() if c not in degraded and w > 0}
+def try_caller_id(caller: str, share: float) -> Intent:
+    """Give `caller` this share of default's traffic, scaling the numbers already there to make room."""
+    def intent(config: dict) -> None:
+        dims = config["allocations"]["default"]
+        dims["caller_id"] = {**{c: round(s * (1 - share), 6) for c, s in _shares(dims["caller_id"]).items()}, caller: share}
+    return intent
+
+
+def give_equal_share(caller: str) -> Intent:
+    """Give `caller` an equal share of every allocation it is in; the others keep their proportions."""
+    def intent(config: dict) -> None:
+        for dims in config["allocations"].values():
+            shares = _shares(dims.get("caller_id") or {})
+            if caller not in shares:
+                continue
+            equal, others = 1 / len(shares), 1 - shares[caller]
+            dims["caller_id"] = {c: round(equal if c == caller else s / others * (1 - equal), 6) for c, s in shares.items()}
+    return intent
+
+
+def _shares(dist: Mapping[str, float]) -> dict[str, float]:
+    total = sum(dist.values())
+    return {c: w / total for c, w in dist.items() if w > 0}
+
+
+def _receivers(shares: Mapping[str, float], degraded: Collection[str], unproven: Collection[str]) -> dict[str, float]:
+    return {c: s for c, s in shares.items() if c not in degraded and c not in unproven}
+
+
+def _moved(shares: Mapping[str, float], degraded: Collection[str], receivers: Mapping[str, float],
+           leaving: float, moved: float) -> dict[str, float]:
+    """`moved` of the traffic goes from the degraded numbers to the receivers, each pro rata to its share."""
+    kept = 1 - moved / leaving
+    received = sum(receivers.values())
+    out = {c: s * kept if c in degraded else s + moved * s / received if c in receivers else s for c, s in shares.items()}
+    return {c: round(s, 6) for c, s in out.items() if round(s, 6) > 0}
+
+
+def largest_shift(composed: Composed) -> float:
+    """The furthest any cohort's welcome, voice or caller-ID distribution moves, in total-variation distance."""
+    before, after = composed.base_config, composed.config
+    cohorts = {"default", *before["allocations"], *after["allocations"]}
+    shifts = [0.0]
+    for dim, cohort in ((d, c) for d in ALLOCATION_DIMS for c in cohorts):
+        a, b = effective_dist(before, cohort, dim), effective_dist(after, cohort, dim)
+        shifts.append(sum(abs(a.get(k, 0) - b.get(k, 0)) for k in {*a, *b}) / 2)
+    return round(max(shifts), 6)
 
 
 def violations(workflow: Mapping, composed: Composed) -> list[str]:
@@ -88,11 +139,14 @@ def config_cohort_of(config: Mapping, features: Mapping[str, str]) -> str:
     return "default"
 
 
-def caller_id_dist(config: Mapping, cohort: str) -> dict[str, float]:
-    """A cohort's caller-ID weights, normalised; a cohort that omits the dimension uses default's."""
+def effective_dist(config: Mapping, cohort: str, dim: str) -> dict[str, float]:
+    """A cohort's weights on one dimension, normalised; a cohort that omits the dimension uses default's."""
     allocations = config["allocations"]
-    dist = allocations.get(cohort, {}).get("caller_id") or allocations.get("default", {}).get("caller_id") or {}
-    return _normalised(dist) or {}
+    return _normalised(allocations.get(cohort, {}).get(dim) or allocations.get("default", {}).get(dim)) or {}
+
+
+def caller_id_dist(config: Mapping, cohort: str) -> dict[str, float]:
+    return effective_dist(config, cohort, "caller_id")
 
 
 def _normalised(dist: Mapping[str, float] | None) -> dict[str, float] | None:
@@ -100,6 +154,15 @@ def _normalised(dist: Mapping[str, float] | None) -> dict[str, float] | None:
         return None
     total = sum(dist.values())
     return {k: round(w / total, 6) for k, w in sorted(dist.items()) if w > 0}
+
+
+def describe_change(dim: str, change: Mapping) -> str:
+    """One dimension's from -> to, in a line a supervisor can read. A schedule table is too long to quote."""
+    if dim == "schedule":
+        return "schedule changes"
+    if "from" in change:
+        return f"{dim} {change['from']} -> {change['to']}"
+    return "; ".join(f"{dim} for {cohort} {c['from']} -> {c['to']}" for cohort, c in sorted(change.items()))
 
 
 def _diff(base: Mapping, new: Mapping) -> dict:

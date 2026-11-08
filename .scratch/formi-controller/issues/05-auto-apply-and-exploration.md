@@ -6,11 +6,11 @@ Spec: user stories 46–49, 51, 62; ADR-0002.
 
 **Blocked by:** 04
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] On nw_renewal, caller-ID changes auto-apply within max_shift
-- [ ] No customer-facing dimension is ever auto-applied on any workflow (verified by config history actors)
-- [ ] On ks_cancel, no auto-apply occurs except a degraded-caller-ID shift
-- [ ] An untested caller ID never exceeds 10% of traffic before it has 300 dials of evidence
-- [ ] A 403 from auto-apply leads to an approval-path Proposal, and both are visible in the audit
-- [ ] `controller report --weekly` lists auto-applied changes with rationale
+- [x] On nw_renewal, caller-ID changes auto-apply within max_shift
+- [x] No customer-facing dimension is ever auto-applied on any workflow (verified by config history actors)
+- [x] On ks_cancel, no auto-apply occurs except a degraded-caller-ID shift
+- [x] An untested caller ID never exceeds 10% of traffic before it has 300 dials of evidence
+- [x] A 403 from auto-apply leads to an approval-path Proposal, and both are visible in the audit
+- [x] `controller report --weekly` lists auto-applied changes with rationale

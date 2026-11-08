@@ -32,6 +32,7 @@ from pathlib import Path
 from typing import Any
 
 from .cohorts import Cohort, Partition
+from .simtime import minute_of
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS run (
@@ -145,7 +146,9 @@ CREATE TABLE IF NOT EXISTS proposals (
     seq             INTEGER NOT NULL,
     status          TEXT    NOT NULL,
     base_version    INTEGER NOT NULL,
-    body            TEXT    NOT NULL,   -- the POST /approvals body, exactly as it is sent
+    route           TEXT    NOT NULL,   -- approval (POST /approvals) or auto (PUT /config)
+    incident        INTEGER NOT NULL,   -- 1: incident response
+    body            TEXT    NOT NULL,   -- the POST /approvals body; an auto-apply sends a subset of it
     replaces        TEXT,               -- the Proposal this one was rebuilt from
     created_minute  INTEGER NOT NULL,
     sent_minute     INTEGER,            -- counts against the request cap; NULL if it never reached the platform
@@ -323,16 +326,49 @@ class Store:
         return self.conn.execute("SELECT COUNT(*) FROM proposals WHERE workflow_id = ? AND sent_minute >= ? "
                                  "AND proposal_id IS NOT ?", (workflow_id, minute, excluding)).fetchone()[0]
 
+    def auto_refused_since(self, workflow_id: str, kind: str, minute: int) -> int:
+        """Auto-apply attempts of this kind, created at or after `minute`, that the platform refused."""
+        return self.conn.execute("SELECT COUNT(*) FROM proposals WHERE workflow_id = ? AND kind = ? AND route = 'auto' "
+                                 "AND status = 'refused' AND created_minute >= ?", (workflow_id, kind, minute)).fetchone()[0]
+
+    def applied_evidence(self, workflow_id: str, kind: str, route: str | None = None,
+                         since_minute: int | None = None) -> list[dict]:
+        """The evidence of each applied Proposal of this kind, oldest first."""
+        return [json.loads(r[0])["evidence"] for r in self.conn.execute(
+            "SELECT body FROM proposals WHERE workflow_id = ?1 AND kind = ?2 AND status = 'applied' "
+            "AND (?3 IS NULL OR route = ?3) AND (?4 IS NULL OR created_minute >= ?4) ORDER BY seq",
+            (workflow_id, kind, route, since_minute))]
+
     # -- what the decide steps read --------------------------------------------------------------
-    def caller_id_counts(self, workflow_id: str, first_hour: int, last_hour: int) -> list[sqlite3.Row]:
-        """Per caller ID and feature cell, call counters between two hours since D0 (inclusive)."""
+    def caller_id_counts(self, workflow_id: str, first_hour: int, last_hour: int, since_version: int = 0) -> list[sqlite3.Row]:
+        """Per caller ID and feature cell, call counters between two hours since D0 (inclusive).
+
+        `since_version` leaves out calls dialled under earlier config versions.
+        """
         return self.conn.execute(
             "SELECT v.caller_id caller_id, lang, city_tier, age_band, value_band, SUM(a.dials) dials, "
             "SUM(a.connected) connected, SUM(a.engaged) engaged "
             "FROM cell_agg a JOIN variants v USING (variant_id) JOIN feature_cells USING (cell_id) "
             "WHERE a.workflow_id = ?1 AND a.day BETWEEN ?2 AND ?3 AND a.day * 24 + a.hour BETWEEN ?4 AND ?5 "
-            "GROUP BY v.caller_id, a.cell_id",
-            (workflow_id, first_hour // 24, last_hour // 24, first_hour, last_hour)).fetchall()
+            "AND a.config_version >= ?6 GROUP BY v.caller_id, a.cell_id",
+            (workflow_id, first_hour // 24, last_hour // 24, first_hour, last_hour, since_version)).fetchall()
+
+    def latest_applied(self, workflow_id: str, kind: str) -> sqlite3.Row | None:
+        return self.conn.execute("SELECT * FROM proposals WHERE workflow_id = ? AND kind = ? AND status = 'applied' "
+                                 "ORDER BY seq DESC LIMIT 1", (workflow_id, kind)).fetchone()
+
+    def last_decision(self, workflow_id: str, kind: str) -> sqlite3.Row | None:
+        return self.conn.execute("SELECT * FROM decisions WHERE workflow_id = ? AND kind = ? "
+                                 "ORDER BY decision_id DESC LIMIT 1", (workflow_id, kind)).fetchone()
+
+    def last_supervisor_edit(self, workflow_id: str, dimension: str) -> int | None:
+        """The simulated minute a supervisor last changed this dimension, if one ever has."""
+        for r in self.conn.execute("SELECT payload FROM world_events WHERE workflow_id = ? AND type = 'config_changed' "
+                                   "ORDER BY event_id DESC", (workflow_id,)):
+            event = json.loads(r[0])
+            if event["actor"] == "supervisor" and dimension in event["changed_dims"]:
+                return minute_of(event["ts"], self.d0())
+        return None
 
     def active_leads_by_cell(self, workflow_id: str, first_active_day: int) -> list[sqlite3.Row]:
         """Per feature cell, the leads of campaigns created since that day."""

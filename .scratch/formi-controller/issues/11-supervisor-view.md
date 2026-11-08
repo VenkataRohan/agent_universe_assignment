@@ -12,3 +12,4 @@ Spec: user stories 18, 72–73.
 - [ ] Pending Proposals are listed with impact score, ordered by it
 - [ ] Decisions not to act appear with their reason
 - [ ] Output is readable by a non-engineer (plain-language cohort and change names)
+- [ ] A change auto-applied as incident response is labelled as such (ADR-0002; the Proposal's `incident_response` field carries it)

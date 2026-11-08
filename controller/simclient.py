@@ -72,13 +72,11 @@ class SimClient:
 
     def apply_approval(self, workflow_id: str, approval_id: str) -> dict:
         """One attempt only. After a failure the caller must look in config history before trying again."""
-        try:
-            r = self._http.request("POST", f"/workflows/{workflow_id}/apply", json={"approval_id": approval_id})
-        except httpx.TransportError as e:
-            raise SimError(0, "transport_error", str(e)) from e
-        if r.status_code >= 400:
-            raise _as_error(r)
-        return r.json()
+        return self._once("POST", f"/workflows/{workflow_id}/apply", {"approval_id": approval_id})
+
+    def auto_apply(self, workflow_id: str, body: dict) -> dict:
+        """One attempt only, for the same reason as `apply_approval`."""
+        return self._once("PUT", f"/workflows/{workflow_id}/config", body)
 
     # -- time ----------------------------------------------------------------------------------
     def advance_to(self, target_minute: int) -> dict:
@@ -110,6 +108,15 @@ class SimClient:
         raise SimError(0, "advance_failed", f"could not reach minute {target_minute}")
 
     # -- plumbing ------------------------------------------------------------------------------
+    def _once(self, method: str, path: str, body: dict) -> Any:
+        try:
+            r = self._http.request(method, path, json=body)
+        except httpx.TransportError as e:
+            raise SimError(0, "transport_error", str(e)) from e
+        if r.status_code >= 400:
+            raise _as_error(r)
+        return r.json()
+
     def _json(self, method: str, path: str, **kw: Any) -> Any:
         return self._request(method, path, **kw).json()
 

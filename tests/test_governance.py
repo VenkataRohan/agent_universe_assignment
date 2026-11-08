@@ -32,7 +32,7 @@ def caller_ids(client, workflow: str) -> dict[str, float]:
 
 def test_degraded_caller_id_is_moved_off_through_an_approved_proposal(world, db_path):
     client = world(days=2, history_days=1)
-    troubled, _ = troubled_client(client, degrade={"nw_renewal": "D2"})
+    troubled, _ = troubled_client(client, degrade={"nw_renewal": "D2"}, approval_only=True)
 
     Controller(troubled, db_path).run()
 
@@ -47,7 +47,7 @@ FIRST = "nw_renewal-caller_id-1"
 
 def degraded_world(world, workflow="nw_renewal", days=2):
     client = world(days=days, history_days=1)
-    troubled, trouble = troubled_client(client, degrade={workflow: "D2"})
+    troubled, trouble = troubled_client(client, degrade={workflow: "D2"}, approval_only=True)
     return client, troubled, trouble
 
 
@@ -154,7 +154,7 @@ def assert_requests_obey(sent: list[dict], earliest_hour: int, last_hour_exclusi
 def expire_every_request(world, degrade, days=3):
     """Each request expires before an approver can see it, so the controller keeps asking until it can't."""
     client = world(days=days, history_days=1)
-    troubled, trouble = troubled_client(client, degrade=degrade)
+    troubled, trouble = troubled_client(client, degrade=degrade, approval_only=True)
     trouble.ttl_hours = 0.25
     return client, troubled
 
@@ -175,7 +175,7 @@ def test_requests_respect_the_kestrel_overlay_and_the_policy_of_other_tenants(wo
 def test_an_overlay_can_only_tighten_the_policy(world, db_path):
     client = world(days=3, history_days=1)
     # Degraded in history too, so it is already flagged at 06:00, when the looser overlay would allow a request.
-    troubled, trouble = troubled_client(client, degrade={"nw_renewal": "D2"}, degrade_history=True)
+    troubled, trouble = troubled_client(client, degrade={"nw_renewal": "D2"}, degrade_history=True, approval_only=True)
     trouble.ttl_hours = 0.25
     looser = {"northwind_life": Overlay(max_requests_per_24h=99, not_before_hour=6)}
 
@@ -188,7 +188,7 @@ def test_an_overlay_can_only_tighten_the_policy(world, db_path):
 
 def test_no_request_goes_out_in_an_approvers_last_two_hours(world, db_path):
     client = world(days=2, history_days=1)
-    troubled, trouble = troubled_client(client, degrade={"nw_renewal": "D2"}, degrade_history=True)
+    troubled, trouble = troubled_client(client, degrade={"nw_renewal": "D2"}, degrade_history=True, approval_only=True)
     trouble.ttl_hours = 0.25
     late_starter = {"northwind_life": Overlay(not_before_hour=16)}  # leaves 16:00 to 17:00 of a window ending at 19:00
 
@@ -201,7 +201,7 @@ def test_no_request_goes_out_in_an_approvers_last_two_hours(world, db_path):
 
 def test_an_expired_proposal_is_rebuilt_from_fresh_data_under_a_new_id(world, db_path):
     client = world(days=3, history_days=1)
-    troubled, trouble = troubled_client(client, degrade={"nw_renewal": "D2"})
+    troubled, trouble = troubled_client(client, degrade={"nw_renewal": "D2"}, approval_only=True)
     trouble.ttl_hours = 0.25
     c = Controller(troubled, db_path)
     step_until(c, lambda: statuses(db_path)[:1] == ["expired"])
@@ -258,7 +258,7 @@ def test_a_proposal_that_revises_a_supervisor_edit_says_so(world, db_path):
     client, troubled, _ = degraded_world(world, days=2)
     c = Controller(troubled, db_path)
     step_until(c, lambda: statuses(db_path)[:1] == ["pending"])
-    edit = {"D1": 0.4, "D2": 0.4, "D3": 0.2}
+    edit = {"D1": 0.6, "D2": 0.4}
 
     supervisor_edit(client, "nw_renewal", lambda cfg: cfg["allocations"]["default"].update(caller_id=edit))
     step_until(c, lambda: len(statuses(db_path)) >= 2)
@@ -266,9 +266,8 @@ def test_a_proposal_that_revises_a_supervisor_edit_says_so(world, db_path):
     rebuilt = queries.proposals(db_path, "nw_renewal")[1]
     assert re.search(r"Revises the D\d+ \d\d:\d\d supervisor edit \(version 2, caller_id\)", rebuilt["change_summary"])
     assert "supervisor edit" in rebuilt["rationale"]
-    assert "caller_id for default {'D1': 0.4, 'D2': 0.4, 'D3': 0.2} -> {'D1': 0.666667, 'D3': 0.333333}" in rebuilt["change_summary"]
-    assert rebuilt["proposed_config"]["allocations"]["default"]["caller_id"] == {"D1": pytest.approx(2 / 3, abs=1e-5),
-                                                                                 "D3": pytest.approx(1 / 3, abs=1e-5)}
+    assert "caller_id for default {'D1': 0.6, 'D2': 0.4} -> {'D1': 1.0}" in rebuilt["change_summary"]
+    assert rebuilt["proposed_config"]["allocations"]["default"]["caller_id"] == {"D1": 1.0}
 
 
 def test_a_supervisor_edit_after_approval_stops_the_apply(world, db_path):
@@ -286,7 +285,7 @@ def test_a_supervisor_edit_after_approval_stops_the_apply(world, db_path):
 
 def test_a_rejected_proposal_is_not_asked_again_the_same_day(world, db_path):
     client = world(days=3, history_days=1)
-    troubled, trouble = troubled_client(client, degrade={"nw_renewal": "D2"})
+    troubled, trouble = troubled_client(client, degrade={"nw_renewal": "D2"}, approval_only=True)
     trouble.blank_summary = True
     c = Controller(troubled, db_path)
     step_until(c, lambda: statuses(db_path)[:1] == ["rejected"])
@@ -327,7 +326,7 @@ def test_a_permanently_refused_apply_does_not_block_the_workflow(world, db_path)
 
 def test_why_keeps_a_rejected_proposal_and_says_why_nothing_changed(world, db_path, capsys):
     client = world(days=2, history_days=1)
-    troubled, trouble = troubled_client(client, degrade={"nw_renewal": "D2"})
+    troubled, trouble = troubled_client(client, degrade={"nw_renewal": "D2"}, approval_only=True)
     trouble.blank_summary = True
     Controller(troubled, db_path).run()
     rejected = queries.proposals(db_path, "nw_renewal")[0]
@@ -433,8 +432,9 @@ def test_why_refuses_a_workflow_or_time_it_cannot_answer_for(world, db_path, cap
 @pytest.mark.slow
 def test_on_public_02_a_degraded_caller_id_is_found_and_moved_off_through_approval(world, db_path):
     client = world("public_02_incidents", days=10, history_days=14)
+    troubled, _ = troubled_client(client, approval_only=True)
 
-    Controller(client, db_path).run()
+    Controller(troubled, db_path).run()
 
     workflows = [w["workflow_id"] for w in client.get("/workflows").json()]
     moved = [(wf, p) for wf in workflows for p in queries.proposals(db_path, wf)

@@ -5,6 +5,7 @@
     python -m controller status [workflow] --db state/controller.db                 # read-only
     python -m controller why <workflow> --at "D3 14:00" --db state/controller.db    # read-only
     python -m controller heard <lead_id> --db state/controller.db                   # read-only
+    python -m controller report --weekly --db state/controller.db                   # read-only
 """
 from __future__ import annotations
 
@@ -41,6 +42,9 @@ def main(argv: list[str] | None = None) -> int:
     hd = sub.add_parser("heard", help="every call one lead received, and why that config was live")
     hd.add_argument("lead_id")
     hd.add_argument("--db", default=argparse.SUPPRESS)
+    rp = sub.add_parser("report", help="the weekly summary: every auto-applied change, what changed and why")
+    rp.add_argument("--weekly", action="store_true", required=True)
+    rp.add_argument("--db", default=argparse.SUPPRESS)
     a = ap.parse_args(argv)
 
     if a.cmd == "health":
@@ -51,6 +55,8 @@ def main(argv: list[str] | None = None) -> int:
         return _why(Path(a.db), a.workflow, a.at)
     if a.cmd == "heard":
         return _heard(Path(a.db), a.lead_id)
+    if a.cmd == "report":
+        return _report(Path(a.db))
     if not a.sim_url:
         ap.error("--sim-url is required to run the loop")
     return _run(a.sim_url, Path(a.db), a.fresh_if_mismatch)
@@ -208,6 +214,23 @@ def _heard(db: Path, lead_id: str) -> int:
               f"{', Approval ' + cfg['approval_id'] if cfg['approval_id'] else ''}")
         if cfg["change_summary"]:
             print(f"    because {cfg['change_summary']}")
+    return 0
+
+
+def _report(db: Path) -> int:
+    if not db.exists():
+        print(f"controller: no store at {db}", file=sys.stderr)
+        return 1
+    weeks = queries.weekly_report(db)["weeks"]
+    if not weeks:
+        print("No auto-applied changes.")
+    for week in weeks:
+        print(f"{week['label']}: {len(week['changes'])} auto-applied change(s)")
+        for c in week["changes"]:
+            print(f"  {c['at']}  {c['workflow_id']}  version {c['version']}  {c['proposal_id']}"
+                  f"{'  [incident response]' if c['incident_response'] else ''}")
+            print(f"    what  {'; '.join(c['what'])}")
+            print(f"    why   {c['why'] or 'not recorded'}")
     return 0
 
 

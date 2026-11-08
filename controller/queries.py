@@ -14,6 +14,7 @@ from pathlib import Path
 
 from . import simtime
 from .cohorts import FEATURES, KPI_COUNTERS, Partition
+from .composer import describe_change
 from .store import connect, load_partition
 
 
@@ -215,10 +216,11 @@ def proposals(db: str | Path, workflow_id: str) -> list[dict]:
 
 
 def _proposal_view(r: sqlite3.Row) -> dict:
-    return {**{k: r[k] for k in ("proposal_id", "workflow_id", "kind", "status", "base_version", "replaces",
+    return {**{k: r[k] for k in ("proposal_id", "workflow_id", "kind", "route", "status", "base_version", "replaces",
                                  "created_minute", "sent_minute", "approval_id", "expires_at", "apply_by",
                                  "decided_minute", "applied_minute", "applied_version")},
-            "reasons": json.loads(r["reasons"]) if r["reasons"] else [], **json.loads(r["body"])}
+            "incident_response": bool(r["incident"]), "reasons": json.loads(r["reasons"]) if r["reasons"] else [],
+            **json.loads(r["body"])}
 
 
 def decisions(db: str | Path, workflow_id: str, kind: str | None = None) -> list[dict]:
@@ -241,6 +243,7 @@ def _decision_view(r: sqlite3.Row) -> dict:
 _INITIAL_CHANGE = {"version": 1, "actor": "business_default", "applied_at": None, "changed_dims": [],
                    "proposal_id": None, "approval_id": None}
 _RECENT_DECISIONS = 10
+_MINUTES_PER_WEEK = 7 * simtime.MINUTES_PER_DAY
 
 
 def minute_at(db: str | Path, text: str) -> int:
@@ -335,6 +338,36 @@ def _decisions_behind(conn: sqlite3.Connection, workflow_id: str, at_minute: int
                             (workflow_id, at_minute, since_minute)).fetchall()
     rows = {r["decision_id"]: r for r in (*recent, *story, *attempts)}
     return [_decision_view(rows[i]) for i in sorted(rows)]
+
+
+def weekly_report(db: str | Path) -> dict:
+    """Every auto-applied change, by simulated week: the world's record of it, and the controller's reasons."""
+    conn = connect(db, readonly=True)
+    try:
+        d0 = _d0(conn)
+        events = [e for e in (json.loads(r[0]) for r in conn.execute(
+            "SELECT payload FROM world_events WHERE type = 'config_changed' ORDER BY event_id"))
+            if e["actor"] == "controller_auto"]
+        rows = {e["proposal_id"]: conn.execute("SELECT * FROM proposals WHERE proposal_id = ?",
+                                               (e["proposal_id"],)).fetchone() for e in events}
+    finally:
+        conn.close()
+    weeks: dict[int, list[dict]] = {}
+    for e in events:
+        minute = simtime.minute_of(e["ts"], d0)
+        weeks.setdefault(minute // _MINUTES_PER_WEEK, []).append(_weekly_entry(e, rows[e["proposal_id"]], minute))
+    return {"weeks": [{"label": f"Week {w + 1} (D{w * 7} to D{w * 7 + 6})", "changes": changes}
+                      for w, changes in sorted(weeks.items())]}
+
+
+def _weekly_entry(event: dict, row: sqlite3.Row | None, minute: int) -> dict:
+    """`row` is None only if the store lost the Proposal: the change is still listed, without its reasons."""
+    p = None if row is None else _proposal_view(row)
+    return {"workflow_id": event["workflow_id"], "at": simtime.label(minute), "version": event["version"],
+            "proposal_id": event["proposal_id"], "changed_dims": event["changed_dims"],
+            "incident_response": False if p is None else p["incident_response"],
+            "what": list(event["changed_dims"]) if p is None else [describe_change(d, c) for d, c in sorted(p["diff"].items())],
+            "why": None if p is None else p["rationale"]}
 
 
 def heard(db: str | Path, lead_id: str) -> dict:

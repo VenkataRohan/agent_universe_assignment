@@ -137,16 +137,28 @@ class Trouble(httpx.BaseTransport):
     - `blank_summary`: every approval request goes out empty-summaried, so the approver must reject it.
     - Any config change whose proposal_id starts with `supervisor-` reads back as a supervisor edit.
       The simulator has no API for those, so a test makes one with PUT and this relabels it.
+    - `lift` / `dampen`: workflow -> caller ID that looks better (one in five of its unanswered dials
+      connects) or mildly worse (one in four of its answered calls never connects).
+    - `approval_only`: the controller is shown policies without auto-apply and no spare caller IDs, so
+      every change takes the approval path and nothing but the test's own trouble is in play.
     """
 
-    def __init__(self, inner: httpx.BaseTransport, degrade: dict[str, str] | None = None, degrade_history: bool = False):
+    def __init__(self, inner: httpx.BaseTransport, degrade: dict[str, str] | None = None, degrade_history: bool = False,
+                 approval_only: bool = False):
         self._inner, self._degrade, self._degrade_history = inner, degrade or {}, degrade_history
+        self._approval_only = approval_only
         self._kill: tuple[str, str, bool] | None = None
         self._lost: tuple[str, str] | None = None
         self._refuse: tuple[str, str, int, str] | None = None
         self.ttl_hours: float | None = None
         self.blank_summary = False
+        self.lift: dict[str, str] = {}
+        self.dampen: dict[str, str] = {}
         self._seen = 0
+        self._lifted = self._dampened = 0
+
+    def degrade(self, workflow: str, caller: str) -> None:
+        self._degrade[workflow] = caller
 
     def kill(self, method: str, path_end: str, after_forward: bool = False) -> None:
         self._kill = (method, path_end, after_forward)
@@ -184,7 +196,18 @@ class Trouble(httpx.BaseTransport):
         if path.endswith("/config/history"):
             resp.read()
             return httpx.Response(200, json=[self._relabel(e) for e in resp.json()])
+        if path == "/workflows" and self._approval_only:
+            resp.read()
+            return httpx.Response(200, json=[self._approval_only_view(w, request) for w in resp.json()])
         return resp
+
+    def _approval_only_view(self, workflow: dict, request: httpx.Request) -> dict:
+        url = request.url.copy_with(path=f"/workflows/{workflow['workflow_id']}/config")
+        config = self._inner.handle_request(httpx.Request("GET", url))
+        config.read()
+        in_use = sorted(c for dims in config.json()["config"]["allocations"].values() for c in dims.get("caller_id", {}))
+        governance = {**workflow["governance"], "auto_apply": {"enabled": False, "allowed_dims": [], "max_shift": 0}}
+        return {**workflow, "governance": governance, "options": {**workflow["options"], "caller_id": in_use}}
 
     def _rewrite_request(self, request: httpx.Request) -> httpx.Request:
         if request.method != "POST" or request.url.path != "/approvals":
@@ -210,10 +233,25 @@ class Trouble(httpx.BaseTransport):
             if self._seen % 5:  # four in five of its answered calls never connect
                 return {**ev, "connected": False, "engaged": False, "disposition": "no_answer", "duration_s": 0,
                         "turns": 0, "qa": None}
+        if ev["type"] == "call":
+            return self._reshape_pickup(ev)
+        return ev
+
+    def _reshape_pickup(self, ev: dict) -> dict:
+        caller, workflow = ev["variant"]["caller_id"], ev["workflow_id"]
+        if not ev["connected"] and caller == self.lift.get(workflow):
+            self._lifted += 1
+            if self._lifted % 5 == 0:
+                return {**ev, "connected": True, "engaged": False, "disposition": "short_hangup", "duration_s": 14, "turns": 2,
+                        "qa": {"hallucination_flag": False, "flow_adherence": 1.0}}
+        if ev["connected"] and caller == self.dampen.get(workflow):
+            self._dampened += 1
+            if self._dampened % 4 == 0:
+                return {**ev, "connected": False, "engaged": False, "disposition": "no_answer", "duration_s": 0, "turns": 0, "qa": None}
         return ev
 
 
-def troubled_client(client: httpx.Client, degrade: dict[str, str] | None = None,
-                    degrade_history: bool = False) -> tuple[httpx.Client, Trouble]:
-    trouble = Trouble(client._transport, degrade, degrade_history)  # type: ignore[attr-defined]
+def troubled_client(client: httpx.Client, degrade: dict[str, str] | None = None, degrade_history: bool = False,
+                    approval_only: bool = False) -> tuple[httpx.Client, Trouble]:
+    trouble = Trouble(client._transport, degrade, degrade_history, approval_only)  # type: ignore[attr-defined]
     return httpx.Client(transport=trouble, base_url=client.base_url), trouble

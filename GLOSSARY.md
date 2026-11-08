@@ -137,5 +137,11 @@ The prompt version a workflow ran most recently without an incident.
 A caller ID whose pickup is significantly and materially below the workflow's other caller IDs over the same period.
 _Avoid_: Spam-flagged (that is a cause we can't observe)
 
+**Exploration**:
+Giving a caller ID with no recent evidence a capped share of traffic until it has enough dials to be kept at an equal share or dropped. Not an experiment: it is operational, and nothing is claimed as a win.
+
+**Unproven caller ID**:
+A caller ID with fewer than 300 dials in the last 7 days. Moving traffic never raises its share.
+
 **Credit reserve**:
 The credits held back for incident response that nothing else may spend.

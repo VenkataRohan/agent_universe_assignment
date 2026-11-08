@@ -99,7 +99,7 @@ class Controller:
     def _decide_workflow(self, workflow: dict, now: int) -> None:
         assert self._governance is not None
         self._governance.reconcile(workflow["workflow_id"], now)
-        callerid.check(self.store, self.sim, self._governance, workflow, now)
+        callerid.respond(self.store, self.sim, self._governance, workflow, now)
 
     def _guarded(self, workflow_id: str, now: int, action: Callable[..., None], *args: object) -> None:
         """One workflow's trouble with the simulator is a recorded outcome, never the loop's end."""

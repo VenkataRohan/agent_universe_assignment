@@ -43,7 +43,7 @@ When a ticket is finished, set its `**Status:**` line to `done` and tick its row
 | 02 | Statistics module | None | [ ] |
 | 03 | Cohorts and history baselines | 01 | [x] |
 | 04 | Governance client on the approval path, first used by degraded caller IDs | 01, 02, 03 | [x] |
-| 05 | Auto-apply path and caller-ID exploration | 04 | [ ] |
+| 05 | Auto-apply path and caller-ID exploration | 04 | [x] |
 | 06 | Hallucination incident response | 04 | [ ] |
 | 07 | Experiments: screen stage | 03, 04 | [ ] |
 | 08 | Experiments: confirm and promotion | 07 | [ ] |
