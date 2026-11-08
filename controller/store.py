@@ -489,17 +489,25 @@ class Store:
         return self.conn.execute("SELECT * FROM incidents WHERE workflow_id = ? AND status IN ('open', 'verifying') "
                                  "ORDER BY seq DESC LIMIT 1", (workflow_id,)).fetchone()
 
-    def prompts_with_incidents(self, workflow_id: str) -> set[str]:
-        """Prompts an incident was raised on, and fixes that failed to bring the flag rate down."""
-        rows = self.conn.execute("SELECT bad_prompt, end_reason, fix_prompt FROM incidents WHERE workflow_id = ?",
+    def ruled_out_prompts(self, workflow_id: str) -> set[str]:
+        """Prompts that can't be gone back to: those blamed through a prompt change, and fixes that didn't work."""
+        rows = self.conn.execute("SELECT bad_prompt, cause, end_reason, fix_prompt FROM incidents WHERE workflow_id = ?",
                                  (workflow_id,)).fetchall()
-        return {r["bad_prompt"] for r in rows} | {r["fix_prompt"] for r in rows if r["end_reason"] == "not_recovered"}
+        return ({r["bad_prompt"] for r in rows if json.loads(r["cause"])["prompt_change"] is not None}
+                | {r["fix_prompt"] for r in rows if r["end_reason"] == "not_recovered"})
 
     def escalated_on(self, workflow_id: str, prompt: str) -> bool:
         """Was an incident on this prompt, or a fix to it, handed to a human?"""
         return self.conn.execute("SELECT 1 FROM incidents WHERE workflow_id = ?1 AND status = 'escalated' "
+                                 "AND end_reason != 'live_prompt_passed_validation' "
                                  "AND (bad_prompt = ?2 AND fix_prompt IS NULL OR fix_prompt = ?2)",
                                  (workflow_id, prompt)).fetchone() is not None
+
+    def cleared_since(self, workflow_id: str, prompt: str, minute: int) -> bool:
+        """Has this prompt's own validation answered a spike on it at or after this minute?"""
+        return self.conn.execute("SELECT 1 FROM incidents WHERE workflow_id = ? AND bad_prompt = ? AND end_minute >= ? "
+                                 "AND end_reason = 'live_prompt_passed_validation'",
+                                 (workflow_id, prompt, minute)).fetchone() is not None
 
     # -- experiments (written only here) ---------------------------------------------------------
     @staticmethod

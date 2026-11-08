@@ -40,6 +40,7 @@ WINDOW_24H = MINUTES_PER_DAY
 # A human said no, or the platform refused the request as invalid: asking again at once can't help.
 # An expired Proposal has no cooldown: nobody said no, it just wasn't looked at in time.
 REJECTION_COOLDOWN_MINUTES = MINUTES_PER_DAY
+INCIDENT_REJECTION_COOLDOWN_MINUTES = 120  # customers are being harmed meanwhile; the request cap still limits the asking
 PROPOSAL_DECISION = "proposal"
 
 
@@ -114,8 +115,9 @@ class GovernanceClient:
         if sent >= policy.max_requests_per_24h:
             return f"{sent} of {policy.max_requests_per_24h} allowed requests sent in the last 24 hours"
         last = self._store.latest_proposal(workflow_id, kind)
-        if last is not None and last["status"] == REJECTED and now - last["decided_minute"] < REJECTION_COOLDOWN_MINUTES:
-            return f"{last['proposal_id']} was rejected less than 24 hours ago"
+        cooldown = INCIDENT_REJECTION_COOLDOWN_MINUTES if incident else REJECTION_COOLDOWN_MINUTES
+        if last is not None and last["status"] == REJECTED and now - last["decided_minute"] < cooldown:
+            return f"{last['proposal_id']} was rejected less than {cooldown // 60} hours ago"
         return None
 
     # -- proposing -----------------------------------------------------------------------------

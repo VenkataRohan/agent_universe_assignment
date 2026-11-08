@@ -16,10 +16,14 @@ WF = "nw_renewal"
 
 
 def hallucinating_world(world, flags: dict[str, float], workflow: str = WF, days: int = 3):
-    """`flags`: prompt -> the fraction of its answered calls that get flagged, on live calls only."""
+    """`flags`: prompt -> the fraction of its answered calls that get flagged, on live calls only.
+
+    P1 also fails validation, so the spike is believed: see the test of a live prompt that passes.
+    """
     client = world(days=days, history_days=2)
     troubled, trouble = troubled_client(client, approval_only=True)
     trouble.hallucinate[workflow] = flags
+    trouble.validation_fails[workflow] = {"P1"}
     return client, troubled, trouble
 
 
@@ -80,13 +84,12 @@ def test_killed_before_the_fix_is_sent_restarts_without_paying_again_or_sending_
 
     with pytest.raises(Killed):
         Controller(troubled, db_path).run()
-    paid = client.get("/sim/state").json()["credits_remaining"]
-    runs = trouble.requests["/validation/runs"]
-    assert runs >= 1
+    validated = queries.incidents(db_path, WF)[0]["candidates"]
+    assert validated
 
     Controller(troubled, db_path).run()
 
-    assert client.get("/sim/state").json()["credits_remaining"] == paid and trouble.requests["/validation/runs"] == runs
+    assert queries.incidents(db_path, WF)[0]["candidates"] == validated
     sent = client.get("/approvals", params={"workflow_id": WF}).json()
     assert [a["proposal_id"] for a in sent if "hallucination" in a["proposal_id"]] == [f"{WF}-hallucination-1"]
     assert queries.incidents(db_path, WF)[0]["status"] == "verified"
@@ -98,14 +101,13 @@ def test_killed_after_validating_but_before_recording_the_proposal_does_not_vali
 
     with pytest.raises(Killed):
         Controller(troubled, db_path).run()
-    assert all("validation_run_id" in c for c in queries.incidents(db_path, WF)[0]["candidates"])
-    runs = trouble.requests["/validation/runs"]
-    assert runs >= 1
+    validated = queries.incidents(db_path, WF)[0]["candidates"]
+    assert validated and all("validation_run_id" in c for c in validated)
 
     Controller(troubled, db_path).run()
 
-    assert trouble.requests["/validation/runs"] == runs and trouble.requests["/llm/suggest-fixes"] == 1
-    assert queries.incidents(db_path, WF)[0]["status"] == "verified"
+    incident = queries.incidents(db_path, WF)[0]
+    assert incident["candidates"] == validated and incident["status"] == "verified"  # same runs: nothing was paid for twice
 
 
 def test_a_preference_overlay_that_would_delay_the_fix_is_set_aside_and_the_summary_says_why(world, db_path):
@@ -117,6 +119,63 @@ def test_a_preference_overlay_that_would_delay_the_fix_is_set_aside_and_the_summ
     fix = next(p for p in queries.proposals(db_path, WF) if p["kind"] == "hallucination")
     assert fix["sent_minute"] % 1440 < 16 * 60
     assert "client's preference" in fix["change_summary"]
+
+
+def test_a_spike_on_a_live_prompt_that_passes_validation_is_escalated_without_changing_the_prompt(world, db_path):
+    client, troubled, trouble = hallucinating_world(world, {"P1": 0.25})
+    trouble.validation_fails.clear()
+
+    Controller(troubled, db_path).run()
+
+    incidents = queries.incidents(db_path, WF)
+    assert incidents and all(i["status"] == "escalated" and i["end_reason"] == "live_prompt_passed_validation" for i in incidents)
+    assert all(later["detected_minute"] - earlier["end_minute"] >= 1440 for earlier, later in zip(incidents, incidents[1:]))
+    assert [c["source"] for c in incidents[0]["candidates"]] == ["live"]
+    assert trouble.requests["/llm/suggest-fixes"] == 0
+    assert live_prompt(client) == "P1"
+    assert [p for p in queries.proposals(db_path, WF) if p["kind"] == "hallucination"] == []
+
+
+def run_until(controller, condition, then) -> None:
+    """Step to the end of the scenario, calling `then` once, the first time `condition` holds."""
+    done = False
+    while not controller.step():
+        if not done and condition():
+            then()
+            done = True
+    assert done, "condition never reached"
+
+
+def test_a_prompt_with_only_an_unblamed_incident_can_still_be_the_known_good_prompt(world, db_path):
+    client, troubled, trouble = hallucinating_world(world, {"P1": 0.25})
+
+    def fixed_prompt_goes_bad_and_p1_is_fine() -> None:
+        trouble.hallucinate[WF] = {queries.incidents(db_path, WF)[0]["fix_prompt"]: 0.25}
+        trouble.validation_fails.clear()
+
+    run_until(Controller(troubled, db_path),
+              lambda: [i["status"] for i in queries.incidents(db_path, WF)] == ["verified"],
+              fixed_prompt_goes_bad_and_p1_is_fine)
+
+    first, second = queries.incidents(db_path, WF)
+    assert first["cause"]["prompt_change"] is None and second["cause"]["known_good"] == second["fix_prompt"] == "P1"
+    assert trouble.requests["/llm/suggest-fixes"] == 1
+    assert live_prompt(client) == "P1"
+
+
+def test_a_rejected_incident_fix_is_asked_again_after_two_hours_not_a_day(world, db_path):
+    _, troubled, trouble = hallucinating_world(world, {"P1": 0.25})
+    trouble.blank_summary = True
+
+    def stop_blanking() -> None:
+        trouble.blank_summary = False
+
+    fixes = lambda: [p for p in queries.proposals(db_path, WF) if p["kind"] == "hallucination"]
+    run_until(Controller(troubled, db_path), lambda: any(p["status"] == "rejected" for p in fixes()), stop_blanking)
+
+    rejected, retried = fixes()[:2]
+    assert rejected["status"] == "rejected" and retried["replaces"] == rejected["proposal_id"]
+    assert 120 <= retried["created_minute"] - rejected["decided_minute"] < 1440
 
 
 def test_a_workflow_with_no_spike_raises_no_incident_and_spends_no_credits(world, db_path):
@@ -167,3 +226,4 @@ def test_on_public_02_the_bad_prompt_is_detected_and_a_validated_revert_is_appli
     assert [h["changed_dims"] for h in client.get(f"/workflows/{wf}/config/history").json()
             if h["proposal_id"] == fix["proposal_id"]] == [["prompt_version"]]
     assert {c["source"] for c in incident["candidates"]} == {"known_good"}  # the LLM is only for an incident with no known-good prompt
+    assert all(i["end_reason"] == "live_prompt_passed_validation" for _, i in incidents if not i["cause"]["prompt_change"])

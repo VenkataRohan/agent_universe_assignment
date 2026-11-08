@@ -153,6 +153,7 @@ class Trouble(httpx.BaseTransport):
       experiment on and a test about something else keeps its traffic and its one in-flight Proposal.
     - `hallucinate`: workflow -> {prompt: fraction}: answered calls on that prompt are QA-flagged at exactly that rate
       (live calls only). `requests` counts every request by path, so a test can say an endpoint was never called.
+    - `validation_fails`: workflow -> prompts whose validation runs come back at a 50% pass rate.
     - `approval_only`: the controller is shown policies without auto-apply and no spare caller IDs,
       welcome messages or voices, so every change takes the approval path and nothing but the test's
       own trouble is in play.
@@ -183,6 +184,7 @@ class Trouble(httpx.BaseTransport):
         self.no_experiments = False
         self.hallucinate: dict[str, dict[str, float]] = {}
         self.requests: Counter[str] = Counter()
+        self.validation_fails: dict[str, set[str]] = {}
         self._seen = 0
         self._lifted = self._dampened = 0
 
@@ -223,6 +225,12 @@ class Trouble(httpx.BaseTransport):
             resp.read()
             lines = [self._rewrite_event(json.loads(l)) for l in resp.text.splitlines() if l]
             return httpx.Response(200, content="\n".join(json.dumps(l) for l in lines).encode())
+        if path == "/validation/runs" and resp.status_code == 200:
+            resp.read()
+            run = resp.json()
+            if run["prompt_version"] in self.validation_fails.get(run["workflow_id"], set()):
+                return httpx.Response(200, json={**run, "pass_rate": 0.5})
+            return httpx.Response(200, json=run)
         if path.endswith("/config/history"):
             resp.read()
             return httpx.Response(200, json=[self._relabel(e) for e in resp.json()])

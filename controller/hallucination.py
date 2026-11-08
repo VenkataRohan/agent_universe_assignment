@@ -1,7 +1,7 @@
 """Hallucination responder: detect -> candidates -> validate -> propose -> verify -> escalate (ADR-0014).
 
 An incident:  open -> verifying -> verified
-              open -> escalated (no candidate passed validation, or credits ran out)
+              open -> escalated (the live prompt passed validation, no candidate did, or credits ran out)
               verifying -> escalated (the flag rate did not come back down)
               open | verifying -> resolved (someone else changed the prompt first)
 
@@ -27,7 +27,9 @@ ONSET_LOOKBACK_MINUTES = MINUTES_PER_DAY
 PROMPT_CHANGE_LOOKBACK_MINUTES = MINUTES_PER_DAY
 VALIDATION_RUN_SIZE = 300
 OPEN, VERIFYING, VERIFIED, ESCALATED, RESOLVED = "open", "verifying", "verified", "escalated", "resolved"
-KNOWN_GOOD, SUGGESTED = "known_good", "llm"
+KNOWN_GOOD, SUGGESTED, LIVE = "known_good", "llm", "live"
+LIVE_PASSED = "live_prompt_passed_validation"
+CLEARED_QUIET_MINUTES = MINUTES_PER_DAY  # one validation has answered this spike; asking every tick would only spend credits
 
 
 def respond(store: Store, sim: SimClient, credits: Credits, governance: GovernanceClient, workflow: Mapping, now: int) -> None:
@@ -64,6 +66,9 @@ def _detect(store: Store, sim: SimClient, workflow: Mapping, now: int) -> sqlite
         return None
     if store.escalated_on(wf, live):
         store.note_decision(now, wf, KIND, "already_escalated", {"prompt": live})
+        return None
+    if store.cleared_since(wf, live, now - CLEARED_QUIET_MINUTES):
+        store.note_decision(now, wf, KIND, "recently_cleared", {"prompt": live})
         return None
     return _raise(store, workflow, live, evidence, baseline, now)
 
@@ -109,7 +114,7 @@ def _cause(store: Store, workflow: Mapping, live: str, now: int) -> dict:
         return {"prompt_change": None, "known_good": None}
     last = changes[-1]
     earlier = store.prompts_before(wf, minute)
-    spoiled = store.prompts_with_incidents(wf) | {live}
+    spoiled = store.ruled_out_prompts(wf) | {live}
     known_good = next((p for p in earlier if p not in spoiled and p in workflow["options"]["prompt_version"]), None)
     previous = next((p for p in earlier if p != live), None)
     return {"prompt_change": {"version": last["version"], "actor": last["actor"], "minute": minute, "from": previous, "to": live},
@@ -135,6 +140,8 @@ def _fix(store: Store, sim: SimClient, credits: Credits, governance: GovernanceC
         if not e.out_of_credits:
             raise
         return _end(store, wf, incident, ESCALATED, "out_of_credits", now, {"error": str(e)})
+    if _live_prompt_passed(candidates, workflow):
+        return _end(store, wf, incident, ESCALATED, LIVE_PASSED, now, {"candidates": candidates})
     chosen = _best(candidates, workflow)
     if chosen is None:
         return _end(store, wf, incident, ESCALATED, "no_valid_fix", now, {"candidates": candidates})
@@ -142,14 +149,19 @@ def _fix(store: Store, sim: SimClient, credits: Credits, governance: GovernanceC
 
 
 def _validated_candidates(store: Store, credits: Credits, workflow: Mapping, incident: sqlite3.Row, now: int) -> list[dict]:
-    """Every candidate that can be tried, validated. The known-good prompt alone, unless it fails or there is none."""
+    """Every candidate that can be tried, validated. The known-good prompt alone, unless it fails or there is none.
+
+    With no prompt change to blame, the live prompt is validated first: if it passes, nothing says a change would help.
+    """
     wf, incident_id = workflow["workflow_id"], incident["incident_id"]
     candidates: list[dict] = json.loads(incident["candidates"])
-    known_good = json.loads(incident["cause"])["known_good"]
-    if known_good is not None and not candidates:
-        candidates = [{"prompt": known_good, "source": KNOWN_GOOD}]
+    cause = json.loads(incident["cause"])
+    if cause["known_good"] is not None and not candidates:
+        candidates = [{"prompt": cause["known_good"], "source": KNOWN_GOOD}]
+    elif cause["prompt_change"] is None and not candidates:
+        candidates = [{"prompt": incident["bad_prompt"], "source": LIVE}]
     candidates = _validate_all(store, credits, wf, incident_id, candidates, now)
-    if _best(candidates, workflow) is not None or incident["suggested"]:
+    if _live_prompt_passed(candidates, workflow) or _best(candidates, workflow) is not None or incident["suggested"]:
         return candidates
     candidates = _ask_llm(store, credits, workflow, incident, candidates, now)
     return _validate_all(store, credits, wf, incident_id, candidates, now)
@@ -175,7 +187,7 @@ def _ask_llm(store: Store, credits: Credits, workflow: Mapping, incident: sqlite
                f"calls flagged in the last {WINDOW_MINUTES // 60} hours.")
     suggestions = credits.suggest_fixes(wf, problem, incident=True)["suggestions"]
     tried = {c["prompt"] for c in candidates}
-    usable = set(workflow["options"]["prompt_version"]) - store.prompts_with_incidents(wf) - tried
+    usable = set(workflow["options"]["prompt_version"]) - store.ruled_out_prompts(wf) - tried
     out = candidates + [{"prompt": s["prompt_version"], "source": SUGGESTED, "summary": s["summary"]}
                         for s in suggestions if s["prompt_version"] in usable]
     with store.transaction() as conn:
@@ -184,10 +196,17 @@ def _ask_llm(store: Store, credits: Credits, workflow: Mapping, incident: sqlite
     return out
 
 
+def _passed(candidate: dict, workflow: Mapping) -> bool:
+    return candidate.get("pass_rate", -1.0) >= workflow["governance"]["min_validation_pass_rate"]
+
+
+def _live_prompt_passed(candidates: list[dict], workflow: Mapping) -> bool:
+    return any(c["source"] == LIVE and _passed(c, workflow) for c in candidates)
+
+
 def _best(candidates: list[dict], workflow: Mapping) -> dict | None:
-    """The candidate that passed with the highest pass rate. Listing order settles ties: known-good comes first."""
-    floor = workflow["governance"]["min_validation_pass_rate"]
-    passed = [c for c in candidates if c.get("pass_rate", -1.0) >= floor]
+    """The fix that passed with the highest pass rate. Listing order settles ties: known-good comes first."""
+    passed = [c for c in candidates if c["source"] != LIVE and _passed(c, workflow)]
     return max(passed, key=lambda c: c["pass_rate"], default=None)
 
 

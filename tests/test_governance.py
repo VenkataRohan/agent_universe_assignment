@@ -283,7 +283,7 @@ def test_a_supervisor_edit_after_approval_stops_the_apply(world, db_path):
     assert queries.proposals(db_path, "nw_renewal")[0]["status"] == "stale"
 
 
-def test_a_rejected_proposal_is_not_asked_again_the_same_day(world, db_path):
+def test_a_rejected_incident_proposal_is_not_asked_again_for_two_hours(world, db_path):
     client = world(days=3, history_days=1)
     troubled, trouble = troubled_client(client, degrade={"nw_renewal": "D2"}, approval_only=True)
     trouble.blank_summary = True
@@ -296,7 +296,7 @@ def test_a_rejected_proposal_is_not_asked_again_the_same_day(world, db_path):
 
     first, second, *_ = queries.proposals(db_path, "nw_renewal")
     assert first["reasons"]
-    assert second["created_minute"] >= rejected_at + 1440 and second["replaces"] == first["proposal_id"]
+    assert second["created_minute"] >= rejected_at + 120 and second["replaces"] == first["proposal_id"]
     held = [d for d in queries.decisions(db_path, "nw_renewal", "caller_id") if d["outcome"] == "held"]
     assert any("rejected" in d["detail"]["hold"] for d in held)
 
