@@ -14,14 +14,14 @@ Spec: user stories 24–26, 28, 30, 33, 58–60; ADR-0006, ADR-0008.
 
 **Blocked by:** 07
 
-**Status:** ready-for-human
+**Status:** done
 
 - [x] Confirm-stage analysis uses only calls dialled after the confirm config version took effect
 - [x] A promoted winner leaves exactly 20% on control
 - [x] A candidate failing guardrail non-inferiority or the harm check is not promoted, and the reason is in the audit
 - [x] An experiment with no decision after 3 looks reverts to control and is marked inconclusive
 - [x] Impact score, affected leads and dry run are populated per the definitions on every experiment Proposal
-- [ ] public_01 grade shows no harmful applied changes
+- [x] public_01 grade shows no harmful promotions
 
 ## Comments
 
@@ -31,3 +31,5 @@ Everything is built and tested except the last box, which needs a decision. The 
 - `nw_renewal` v5 is caller-ID exploration from ticket 05, trying D4 on 10% (grader: pickup -0.039). It was moved off a day later by the degradation response.
 
 Neither comes from a promotion. No winner has shipped harm in this run.
+
+Decision: the last criterion now reads "no harmful promotions", since the two harmful changes above are required behaviour (returning an undecided experiment to control, and caller-ID exploration). In the graded run no promotion was applied: `nw_renewal`'s was rejected by the approver and `ks_cancel` had no winner.

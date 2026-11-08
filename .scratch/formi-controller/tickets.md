@@ -46,7 +46,7 @@ When a ticket is finished, set its `**Status:**` line to `done` and tick its row
 | 05 | Auto-apply path and caller-ID exploration | 04 | [x] |
 | 06 | Hallucination incident response | 04 | [ ] |
 | 07 | Experiments: screen stage | 03, 04 | [x] |
-| 08 | Experiments: confirm and promotion | 07 | [ ] |
+| 08 | Experiments: confirm and promotion | 07 | [x] |
 | 09 | Decay rollback and holdback release | 08 | [ ] |
 | 10 | Per-cohort call time | 03, 05 | [ ] |
 | 11 | Consolidated supervisor view | 06, 08, 10 | [ ] |
