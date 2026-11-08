@@ -92,6 +92,7 @@ def test_kestrel_gets_one_labelled_incident_step_within_max_shift_and_the_rest_g
 def test_a_403_from_auto_apply_becomes_an_approval_path_proposal_and_both_are_in_the_audit(world, db_path):
     client = world(days=2, history_days=1)
     troubled, trouble = troubled_client(client, degrade={"nw_renewal": "D2"})
+    trouble.no_experiments = True
     trouble.refuse("PUT", "/workflows/nw_renewal/config", 403, "auto_apply_not_permitted")
 
     Controller(troubled, db_path).run()
@@ -111,6 +112,7 @@ def test_a_403_from_auto_apply_becomes_an_approval_path_proposal_and_both_are_in
 def test_any_hard_refusal_of_an_auto_apply_falls_back_once_instead_of_retrying_every_tick(world, db_path):
     client = world(days=2, history_days=1)
     troubled, trouble = troubled_client(client, degrade={"nw_renewal": "D2"})
+    trouble.no_experiments = True
     trouble.refuse("PUT", "/workflows/nw_renewal/config", 422, "invalid_config")
 
     Controller(troubled, db_path).run()
@@ -183,7 +185,7 @@ def test_an_untested_caller_id_gets_ten_percent_until_it_has_300_dials_then_an_e
 
 
 def test_a_caller_id_that_does_worse_in_exploration_is_dropped_and_its_weight_returns_to_the_proven_ones(world, db_path):
-    client, troubled = explored_world(world, dampen={"nw_renewal": "D3"})
+    client, troubled = explored_world(world, dampen={"nw_renewal": "D3"}, no_experiments=True)
 
     Controller(troubled, db_path).run()
 
@@ -328,6 +330,7 @@ def test_a_dropped_caller_id_is_not_explored_again_once_its_evidence_has_aged_ou
     client = world(days=9, history_days=1)
     troubled, trouble = troubled_client(client)
     trouble.dampen["nw_renewal"] = "D3"
+    trouble.no_experiments = True
 
     Controller(troubled, db_path).run()
 

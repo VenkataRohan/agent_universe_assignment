@@ -77,6 +77,13 @@ def give_equal_share(caller: str) -> Intent:
     return intent
 
 
+def set_distribution(dim: str, distribution: Mapping[str, float]) -> Intent:
+    """Replace default's weights on one dimension."""
+    def intent(config: dict) -> None:
+        config["allocations"]["default"][dim] = dict(distribution)
+    return intent
+
+
 def _shares(dist: Mapping[str, float]) -> dict[str, float]:
     total = sum(dist.values())
     return {c: w / total for c, w in dist.items() if w > 0}
@@ -142,14 +149,14 @@ def config_cohort_of(config: Mapping, features: Mapping[str, str]) -> str:
 def effective_dist(config: Mapping, cohort: str, dim: str) -> dict[str, float]:
     """A cohort's weights on one dimension, normalised; a cohort that omits the dimension uses default's."""
     allocations = config["allocations"]
-    return _normalised(allocations.get(cohort, {}).get(dim) or allocations.get("default", {}).get(dim)) or {}
+    return normalised(allocations.get(cohort, {}).get(dim) or allocations.get("default", {}).get(dim)) or {}
 
 
 def caller_id_dist(config: Mapping, cohort: str) -> dict[str, float]:
     return effective_dist(config, cohort, "caller_id")
 
 
-def _normalised(dist: Mapping[str, float] | None) -> dict[str, float] | None:
+def normalised(dist: Mapping[str, float] | None) -> dict[str, float] | None:
     if not dist:
         return None
     total = sum(dist.values())
@@ -173,8 +180,8 @@ def _diff(base: Mapping, new: Mapping) -> dict:
     for dim in ALLOCATION_DIMS:
         per_cohort = {}
         for cohort in sorted({*before, *after}):
-            a = _normalised(before.get(cohort, {}).get(dim))
-            b = _normalised(after.get(cohort, {}).get(dim))
+            a = normalised(before.get(cohort, {}).get(dim))
+            b = normalised(after.get(cohort, {}).get(dim))
             if a != b:
                 per_cohort[cohort] = {"from": a, "to": b}
         if per_cohort:

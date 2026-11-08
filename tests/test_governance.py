@@ -306,7 +306,7 @@ def test_with_nothing_degraded_every_tick_records_that_it_did_nothing(world, db_
 
     Controller(client, db_path).run()
 
-    assert approvals(client, "nw_renewal") == []
+    assert [a for a in approvals(client, "nw_renewal") if "-caller_id" in a["proposal_id"]] == []
     decided = queries.decisions(db_path, "nw_renewal", "caller_id")
     assert len(decided) == 4 * 24 - 1  # every tick but the last, which ends the scenario
     assert {d["outcome"] for d in decided} == {"healthy"}

@@ -139,8 +139,13 @@ class Trouble(httpx.BaseTransport):
       The simulator has no API for those, so a test makes one with PUT and this relabels it.
     - `lift` / `dampen`: workflow -> caller ID that looks better (one in five of its unanswered dials
       connects) or mildly worse (one in four of its answered calls never connects).
-    - `approval_only`: the controller is shown policies without auto-apply and no spare caller IDs, so
-      every change takes the approval path and nothing but the test's own trouble is in play.
+    - `dull`: workflow -> welcome or voice options whose answered calls never engage.
+    - `primary`: workflow -> the primary KPI the controller is shown for it, instead of its own.
+    - `no_experiments`: the controller is shown no spare welcome messages or voices, so it has nothing to
+      experiment on and a test about something else keeps its traffic and its one in-flight Proposal.
+    - `approval_only`: the controller is shown policies without auto-apply and no spare caller IDs,
+      welcome messages or voices, so every change takes the approval path and nothing but the test's
+      own trouble is in play.
     """
 
     def __init__(self, inner: httpx.BaseTransport, degrade: dict[str, str] | None = None, degrade_history: bool = False,
@@ -154,6 +159,9 @@ class Trouble(httpx.BaseTransport):
         self.blank_summary = False
         self.lift: dict[str, str] = {}
         self.dampen: dict[str, str] = {}
+        self.dull: dict[str, set[str]] = {}
+        self.primary: dict[str, str] = {}
+        self.no_experiments = False
         self._seen = 0
         self._lifted = self._dampened = 0
 
@@ -196,18 +204,37 @@ class Trouble(httpx.BaseTransport):
         if path.endswith("/config/history"):
             resp.read()
             return httpx.Response(200, json=[self._relabel(e) for e in resp.json()])
-        if path == "/workflows" and self._approval_only:
+        if path == "/workflows" and (self._approval_only or self.primary or self.no_experiments):
             resp.read()
-            return httpx.Response(200, json=[self._approval_only_view(w, request) for w in resp.json()])
+            return httpx.Response(200, json=[self._view(w, request) for w in resp.json()])
         return resp
 
+    def _view(self, workflow: dict, request: httpx.Request) -> dict:
+        if self._approval_only:
+            workflow = self._approval_only_view(workflow, request)
+        elif self.no_experiments:
+            workflow = {**workflow, "options": self._options_in_use(workflow, request, ("welcome_message", "voice"))}
+        return self._primary_view(workflow)
+
+    def _primary_view(self, workflow: dict) -> dict:
+        primary = self.primary.get(workflow["workflow_id"])
+        if primary is None or primary == workflow["objective"]["primary"]:
+            return workflow
+        other = next(k for k in ("pickup_rate", "engagement_rate") if k != primary)
+        return {**workflow, "objective": {"primary": primary, "guardrail": {f"{other}_max_drop": 0.02}}}
+
     def _approval_only_view(self, workflow: dict, request: httpx.Request) -> dict:
+        governance = {**workflow["governance"], "auto_apply": {"enabled": False, "allowed_dims": [], "max_shift": 0}}
+        return {**workflow, "governance": governance,
+                "options": self._options_in_use(workflow, request, ("caller_id", "welcome_message", "voice"))}
+
+    def _options_in_use(self, workflow: dict, request: httpx.Request, dims: tuple[str, ...]) -> dict:
         url = request.url.copy_with(path=f"/workflows/{workflow['workflow_id']}/config")
         config = self._inner.handle_request(httpx.Request("GET", url))
         config.read()
-        in_use = sorted(c for dims in config.json()["config"]["allocations"].values() for c in dims.get("caller_id", {}))
-        governance = {**workflow["governance"], "auto_apply": {"enabled": False, "allowed_dims": [], "max_shift": 0}}
-        return {**workflow, "governance": governance, "options": {**workflow["options"], "caller_id": in_use}}
+        in_use = {dim: sorted(c for table in config.json()["config"]["allocations"].values() for c in table.get(dim, {}))
+                  for dim in dims}
+        return {**workflow["options"], **in_use}
 
     def _rewrite_request(self, request: httpx.Request) -> httpx.Request:
         if request.method != "POST" or request.url.path != "/approvals":
@@ -234,7 +261,12 @@ class Trouble(httpx.BaseTransport):
                 return {**ev, "connected": False, "engaged": False, "disposition": "no_answer", "duration_s": 0,
                         "turns": 0, "qa": None}
         if ev["type"] == "call":
-            return self._reshape_pickup(ev)
+            return self._dull_engagement(self._reshape_pickup(ev))
+        return ev
+
+    def _dull_engagement(self, ev: dict) -> dict:
+        if ev["engaged"] and {ev["variant"]["welcome_message"], ev["variant"]["voice"]} & self.dull.get(ev["workflow_id"], set()):
+            return {**ev, "engaged": False, "disposition": "short_hangup"}
         return ev
 
     def _reshape_pickup(self, ev: dict) -> dict:

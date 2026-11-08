@@ -15,7 +15,7 @@ from pathlib import Path
 from . import simtime
 from .cohorts import FEATURES, KPI_COUNTERS, Partition
 from .composer import describe_change
-from .store import connect, load_partition
+from .store import connect, experiment_view, load_partition
 
 
 def daily_kpis(db: str | Path) -> list[dict]:
@@ -239,6 +239,16 @@ def _decision_view(r: sqlite3.Row) -> dict:
             "detail": json.loads(r["detail"])}
 
 
+def experiments(db: str | Path, workflow_id: str) -> list[dict]:
+    """This workflow's experiments, oldest first, and where each one has got to."""
+    conn = connect(db, readonly=True)
+    try:
+        return [experiment_view(r) for r in conn.execute("SELECT * FROM experiments WHERE workflow_id = ? ORDER BY seq",
+                                                         (workflow_id,))]
+    finally:
+        conn.close()
+
+
 # -- why and heard: every answer comes from the store ----------------------------------------------
 _INITIAL_CHANGE = {"version": 1, "actor": "business_default", "applied_at": None, "changed_dims": [],
                    "proposal_id": None, "approval_id": None}
@@ -289,10 +299,22 @@ def why(db: str | Path, workflow_id: str, at_minute: int) -> dict:
             "evidence": None if proposal is None else proposal["evidence"],
             "approval": _approval_decision(conn, workflow_id, in_force["approval_id"]),
             "aftermath": _aftermath(conn, workflow_id, in_force["version"], changes),
+            "experiment": _experiment_at(conn, workflow_id, at_minute),
             "decisions": _decisions_behind(conn, workflow_id, at_minute, in_force["proposal_id"], since),
         }
     finally:
         conn.close()
+
+
+def _experiment_at(conn: sqlite3.Connection, workflow_id: str, at_minute: int) -> dict | None:
+    """The workflow's experiment as it stood then: each state change's decision carries the experiment."""
+    for r in conn.execute("SELECT * FROM decisions WHERE workflow_id = ? AND kind = 'experiment' AND minute <= ? "
+                          "ORDER BY decision_id DESC", (workflow_id, at_minute)):
+        detail = json.loads(r["detail"])
+        if "experiment" in detail:
+            return {**detail["experiment"], "last_decision": r["outcome"], "decided_at": simtime.label(r["minute"]),
+                    "dimensions": detail.get("dimensions")}
+    return None
 
 
 def _approval_decision(conn: sqlite3.Connection, workflow_id: str, approval_id: str | None) -> dict | None:
@@ -336,7 +358,9 @@ def _decisions_behind(conn: sqlite3.Connection, workflow_id: str, at_minute: int
     attempts = conn.execute("SELECT * FROM decisions WHERE workflow_id = ?1 AND kind = 'proposal' "
                             "AND minute <= ?2 AND (?3 IS NULL OR minute >= ?3) ORDER BY decision_id",
                             (workflow_id, at_minute, since_minute)).fetchall()
-    rows = {r["decision_id"]: r for r in (*recent, *story, *attempts)}
+    experiment = conn.execute("SELECT * FROM decisions WHERE workflow_id = ? AND kind = 'experiment' AND minute <= ? "
+                              "ORDER BY decision_id", (workflow_id, at_minute)).fetchall()
+    rows = {r["decision_id"]: r for r in (*recent, *story, *attempts, *experiment)}
     return [_decision_view(rows[i]) for i in sorted(rows)]
 
 

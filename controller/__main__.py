@@ -35,7 +35,7 @@ def main(argv: list[str] | None = None) -> int:
     st = sub.add_parser("status", help="each workflow's analysis partition and history baselines")
     st.add_argument("workflow", nargs="?", help="just this workflow (default: all)")
     st.add_argument("--db", default=argparse.SUPPRESS)
-    w = sub.add_parser("why", help="the change in force at a moment: Proposal, evidence, approval, aftermath")
+    w = sub.add_parser("why", help="the change in force at a moment: Proposal, evidence, approval, aftermath, experiment")
     w.add_argument("workflow")
     w.add_argument("--at", required=True, help='a simulated time, e.g. "D3 14:00"')
     w.add_argument("--db", default=argparse.SUPPRESS)
@@ -175,11 +175,23 @@ def _why(db: Path, workflow: str, at: str) -> int:
         print(f"              version before: {_version_line(after['under_previous_version'])}")
     n = after["next_change"]
     print(f"              next change: {'none' if n is None else 'version ' + str(n['version']) + ' by ' + n['actor'] + ' at ' + n['applied_at']}")
+    if w["experiment"] is not None:
+        print(f"  experiment  {_experiment_line(w['experiment'])}")
     print("  decisions")
     for d in w["decisions"]:
         print(f"    {simtime.label(d['minute'])}  {d['kind']:<10}{d['outcome']:<22}{d['proposal_id'] or ''}"
               f"{_decision_reason(d['detail'])}")
     return 0
+
+
+def _experiment_line(e: dict) -> str:
+    plans = e["design"]["dimensions"]
+    line = (f"{e['experiment_id']}: {e['status']} ({e['last_decision']} at {e['decided_at']}); "
+            + "; ".join(f"{d} {p['control']} against {', '.join(p['challengers'])}" for d, p in sorted(plans.items())))
+    if e["candidates"]:
+        line += "; candidates " + ", ".join(f"{d} {o}" for d, o in sorted(e["candidates"].items()))
+    eliminated = [o for view in (e["dimensions"] or {}).values() for o in view.get("eliminated", [])]
+    return line + (f"; eliminated {', '.join(eliminated)}" if eliminated else "")
 
 
 def _decision_reason(detail: dict) -> str:

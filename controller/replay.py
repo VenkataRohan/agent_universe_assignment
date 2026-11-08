@@ -12,7 +12,7 @@ from statistics import NormalDist
 from typing import NamedTuple
 
 from .cohorts import FEATURES, Partition
-from .composer import Composed, caller_id_dist, config_cohort_of
+from .composer import ALLOCATION_DIMS, Composed, caller_id_dist, config_cohort_of, effective_dist
 from .simtime import MINUTES_PER_DAY
 from .store import Store, load_partition
 
@@ -41,9 +41,9 @@ def affected_leads(store: Store, workflow: Mapping, composed: Composed, now: int
     for r in store.active_leads_by_cell(workflow["workflow_id"], first_active_day):
         total += r["leads"]
         features = {f: r[f] for f in FEATURES}
-        before = caller_id_dist(composed.base_config, config_cohort_of(composed.base_config, features))
-        after = caller_id_dist(composed.config, config_cohort_of(composed.config, features))
-        if before != after:
+        cohort_before, cohort_after = (config_cohort_of(c, features) for c in (composed.base_config, composed.config))
+        if any(effective_dist(composed.base_config, cohort_before, d) != effective_dist(composed.config, cohort_after, d)
+               for d in ALLOCATION_DIMS):
             affected += r["leads"]
     running = 0 if workflow["mid_flight"] == "next_campaign_only" else affected
     return running + round(workflow["daily_batch"]["size"] * (affected / total if total else 1.0))

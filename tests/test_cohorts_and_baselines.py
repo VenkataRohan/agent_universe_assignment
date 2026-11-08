@@ -14,7 +14,7 @@ from controller import queries
 from controller.__main__ import main as cli_main
 from controller.loop import Controller
 
-from .harness import all_events, features, scripted_client
+from .harness import all_events, features, scripted_client, troubled_client
 
 
 def test_baselines_come_from_history_alone(world, db_path):
@@ -352,7 +352,9 @@ def _apply_through_approval(client, controller, wf: str, cohorts: list[dict]) ->
 
 def test_materialised_cohorts_are_accepted_and_call_events_carry_the_same_ids(world, db_path):
     client = world(days=2, history_days=2)
-    c = Controller(client, db_path)
+    quiet, trouble = troubled_client(client)
+    trouble.no_experiments = True  # this test's own request needs the config to itself
+    c = Controller(quiet, db_path)
     for _ in range(4 * 10):  # D0 10:00, inside approver hours
         c.step()
 

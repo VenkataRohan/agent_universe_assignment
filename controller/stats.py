@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import math
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from statistics import NormalDist
 
@@ -15,6 +15,8 @@ GUARDRAIL_ALPHA = 0.05
 HARM_ALPHA = 0.10  # per cohort, deliberately uncorrected: a harm check should err towards blocking
 DECAY_ALPHA = 0.05
 SCREEN_ELIMINATION_ALPHA = 0.05
+SCREEN_MIN_TRAFFIC_PER_ARM = 200  # about two days for the smallest arm of a split at the traffic we measured (ADR-0010)
+SCREEN_MAX_DAYS = 4               # how long a screen may wait for that traffic before it ends without a candidate
 
 HALLUCINATION_ALPHA = 0.001
 HALLUCINATION_MIN_CONNECTS = 150
@@ -129,17 +131,38 @@ class ScreenResult:
 
 
 def screen(control: Counts, challengers: Mapping[str, Counts]) -> ScreenResult:
+    """The screen over one population. See `screen_strata`."""
+    return screen_strata([(control, challengers)])
+
+
+def screen_strata(strata: Sequence[tuple[Counts, Mapping[str, Counts]]]) -> ScreenResult:
     """Drop the clearly worse, then take the best remaining challenger if it beats control on its point estimate.
 
-    Ties go to the alphabetically first name. Arms that never ran are ignored, and without control
-    data there is nothing to compare against.
+    `strata`: (control, challengers) per stratum. Arms are compared only inside a stratum, then combined, so a
+    change between strata can't pass for a difference between arms. Ties go to the alphabetically first name. A
+    stratum where a challenger or control never ran says nothing about that challenger.
     """
-    ran = {name: counts for name, counts in sorted(challengers.items()) if counts.trials and control.trials}
-    eliminated = tuple(name for name, counts in ran.items()
-                       if _one_sided(control, counts, SCREEN_ELIMINATION_ALPHA).holds)
+    ran = {}
+    for name in sorted({name for _, challengers in strata for name in challengers}):
+        pairs = [(challengers[name], control) for control, challengers in strata
+                 if name in challengers and challengers[name].trials and control.trials]
+        if pairs:
+            ran[name] = _stratified_difference(pairs)
+    eliminated = tuple(name for name, (difference, variance) in ran.items()
+                       if variance and _NORMAL.cdf(difference / math.sqrt(variance)) < SCREEN_ELIMINATION_ALPHA)
     remaining = [name for name in ran if name not in eliminated]
-    best = max(remaining, key=lambda name: ran[name].rate, default=None)  # max keeps the first of equals
-    return ScreenResult(best if best is not None and ran[best].rate > control.rate else None, eliminated)
+    best = max(remaining, key=lambda name: ran[name][0], default=None)  # max keeps the first of equals
+    return ScreenResult(best if best is not None and ran[best][0] > 0 else None, eliminated)
+
+
+def _stratified_difference(pairs: Sequence[tuple[Counts, Counts]]) -> tuple[float, float]:
+    """Challenger's rate minus control's, Mantel-Haenszel weighted over (challenger, control) strata, and its
+    variance under "no difference". With one stratum this is the pooled two-proportion test."""
+    weights = [a.trials * b.trials / (a.trials + b.trials) for a, b in pairs]
+    total = sum(weights)
+    pooled = [(a.successes + b.successes) / (a.trials + b.trials) for a, b in pairs]
+    difference = sum(w * (a.rate - b.rate) for w, (a, b) in zip(weights, pairs)) / total
+    return difference, sum(w * p * (1 - p) for w, p in zip(weights, pooled)) / total ** 2
 
 
 def _binomial_p_at_least(k: int, n: int, p: float) -> float:

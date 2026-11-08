@@ -307,3 +307,35 @@ def test_identical_inputs_give_identical_outputs():
 
 def test_screen_with_no_control_data_has_no_candidate():
     assert stats.screen(stats.Counts(0, 0), {"W1": stats.Counts(500, 1000)}).candidate is None
+
+
+def test_a_stratified_screen_is_not_fooled_by_an_arm_mix_that_differs_between_strata():
+    # Control 56% pooled against 34%, but the challenger is 10 points better inside each stratum.
+    high = (stats.Counts(540, 900), {"W2": stats.Counts(70, 100)})
+    low = (stats.Counts(20, 100), {"W2": stats.Counts(270, 900)})
+
+    result = stats.screen_strata([high, low])
+
+    assert result.candidate == "W2" and result.eliminated == ()
+
+
+def test_a_stratified_screen_eliminates_a_challenger_worse_in_every_stratum():
+    one = (stats.Counts(300, 500), {"W2": stats.Counts(80, 250)})
+    two = (stats.Counts(150, 500), {"W2": stats.Counts(30, 250)})
+
+    assert stats.screen_strata([one, two]) == stats.ScreenResult(None, ("W2",))
+
+
+def test_a_single_stratum_decides_exactly_as_the_plain_screen_does():
+    control = stats.Counts(540, 1000)
+    challengers = {"W1": stats.Counts(450, 1000), "W2": stats.Counts(560, 1000), "W3": stats.Counts(545, 1000)}
+
+    assert stats.screen_strata([(control, challengers)]) == stats.screen(control, challengers)
+
+
+def test_a_stratum_where_an_arm_never_ran_contributes_nothing_to_that_arm():
+    ran = (stats.Counts(500, 1000), {"W2": stats.Counts(550, 1000)})
+    empty = (stats.Counts(0, 0), {"W2": stats.Counts(0, 500)})
+    no_challenger = (stats.Counts(900, 1000), {"W2": stats.Counts(0, 0)})
+
+    assert stats.screen_strata([ran, empty, no_challenger]) == stats.screen(*ran)

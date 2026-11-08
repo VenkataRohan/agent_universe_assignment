@@ -1,6 +1,6 @@
 """Caller-ID responder: move off degraded numbers (ADR-0002) and test unused ones on a capped share.
 
-Runs every tick. A degradation pass over a rolling day leaves one decision behind, "healthy"
+Both steps run every tick. A degradation pass over a rolling day leaves one decision behind, "healthy"
 included, and exploration records each change in its state, so "why didn't it change?" can be
 answered from the store.
 """
@@ -28,12 +28,8 @@ EXPLORE_SHARE = 0.10
 SUPERVISOR_QUIET_MINUTES = 7 * MINUTES_PER_DAY  # a supervisor's own caller-ID choice is left to run this long
 
 
-def respond(store: Store, sim: SimClient, governance: GovernanceClient, workflow: Mapping, now: int) -> None:
-    _explore(store, sim, governance, workflow, now, _check_degraded(store, sim, governance, workflow, now))
-
-
 # -- degradation ----------------------------------------------------------------------------------
-def _check_degraded(store: Store, sim: SimClient, governance: GovernanceClient, workflow: Mapping, now: int) -> list[str]:
+def check_degraded(store: Store, sim: SimClient, governance: GovernanceClient, workflow: Mapping, now: int) -> list[str]:
     """Respond to any degraded caller ID, and return the ones found."""
     wf = workflow["workflow_id"]
     hour = now // 60
@@ -103,8 +99,8 @@ class _Plan:
     affected_share: float
 
 
-def _explore(store: Store, sim: SimClient, governance: GovernanceClient, workflow: Mapping, now: int,
-             flagged: list[str]) -> None:
+def explore(store: Store, sim: SimClient, governance: GovernanceClient, workflow: Mapping, now: int,
+            flagged: list[str]) -> None:
     """At most one caller ID being explored per workflow: start one, or conclude the one running."""
     wf = workflow["workflow_id"]
     if flagged:
@@ -215,11 +211,7 @@ def _decided(store: Store, now: int, wf: str, kind: str, outcome: str, detail: d
 
 
 def _noted(store: Store, now: int, wf: str, outcome: str, hold: str | None) -> None:
-    """Exploration's decisions not to act, recorded when they change: the latest row is true until the next one."""
-    detail = {} if hold is None else {"hold": hold}
-    last = store.last_decision(wf, EXPLORE_KIND)
-    if last is None or last["proposal_id"] is not None or (last["outcome"], json.loads(last["detail"])) != (outcome, detail):
-        _decided(store, now, wf, EXPLORE_KIND, outcome, detail)
+    store.note_decision(now, wf, EXPLORE_KIND, outcome, {} if hold is None else {"hold": hold})
 
 
 def _unproven(store: Store, workflow: Mapping, hour: int) -> set[str]:

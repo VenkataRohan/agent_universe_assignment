@@ -6,10 +6,10 @@ Spec: user stories 19–23, 27, 29, 57, 61; ADR-0005, ADR-0006, ADR-0007.
 
 **Blocked by:** 03, 04
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] On public_01, nw_renewal and ks_cancel each get an approved screen; nw_kyc gets none
-- [ ] Control share is ≥ 50% on every dimension during a screen
-- [ ] Each screen ends with at most one candidate per dimension, or ends with no candidate
-- [ ] A supervisor edit to an experimented dimension aborts the experiment; calls after the edit are excluded
-- [ ] Experiment state and screen decisions are visible through `controller why` / the audit
+- [x] On public_01, nw_renewal and ks_cancel each get an approved screen; nw_kyc gets none
+- [x] Control share is ≥ 50% on every dimension during a screen
+- [x] Each screen ends with at most one candidate per dimension, or ends with no candidate
+- [x] A supervisor edit to an experimented dimension aborts the experiment; calls after the edit are excluded
+- [x] Experiment state and screen decisions are visible through `controller why` / the audit

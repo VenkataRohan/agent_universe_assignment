@@ -100,6 +100,16 @@ The combination of welcome message, voice, caller ID and prompt version one call
 
 **Screen**:
 The first stage of an experiment: every challenger runs at once, only to choose one candidate per dimension. Nothing is promoted from it.
+A screen's Proposal is labelled "exploration" to say it claims no win. That is a label for the approver; it is not caller-ID Exploration.
+
+**Arm**:
+One option of an experimented dimension, with the calls that heard it. Control is an arm; so is each challenger.
+
+**Stratum**:
+The calls of one config version within an experiment. Arms are compared inside a stratum, so a change that isn't to an experimented dimension can't pass for a difference between arms.
+
+**Candidate**:
+The one challenger per dimension a screen sends forward to confirm. Not a winner: nothing is promoted from a screen.
 
 **Confirm**:
 The second stage: one candidate against control, judged on fresh data only.

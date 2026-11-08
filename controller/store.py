@@ -19,13 +19,14 @@ Written once per workflow, after history is in (see `analysis`):
 Written by the governance client and the decide steps:
 - proposals  the controller's record of each config change it wants, committed before anything is sent
 - decisions  every decide step's outcome and inputs, including "did nothing"
+- experiments  each experiment's design and where its state machine has got to
 """
 from __future__ import annotations
 
 import json
 import sqlite3
 import time
-from collections.abc import Iterator
+from collections.abc import Collection, Iterator
 from contextlib import contextmanager
 from datetime import date
 from pathlib import Path
@@ -172,6 +173,22 @@ CREATE TABLE IF NOT EXISTS decisions (
     detail      TEXT    NOT NULL   -- JSON: the inputs the decision was made from
 );
 CREATE INDEX IF NOT EXISTS decisions_by_wf ON decisions (workflow_id, minute);
+CREATE TABLE IF NOT EXISTS experiments (
+    experiment_id  TEXT PRIMARY KEY,
+    workflow_id    TEXT    NOT NULL,
+    seq            INTEGER NOT NULL,
+    status         TEXT    NOT NULL,
+    design         TEXT    NOT NULL,   -- JSON: per dimension its control, challengers and split
+    planned_minute INTEGER NOT NULL,
+    screen_version INTEGER,            -- the config version the split went live in
+    screen_minute  INTEGER,
+    last_look_day  INTEGER,            -- the day of the latest daily look
+    candidates     TEXT,               -- JSON: the candidate per dimension, once the screen has chosen
+    end_minute     INTEGER,
+    end_reason     TEXT,
+    split_live   INTEGER NOT NULL DEFAULT 0,  -- 1: it has ended, and its split may still be live
+    UNIQUE (workflow_id, seq)
+);
 """
 
 
@@ -188,6 +205,12 @@ def connect(path: str | Path, readonly: bool = False) -> sqlite3.Connection:
     conn.execute("PRAGMA busy_timeout=5000")
     conn.row_factory = sqlite3.Row
     return conn
+
+
+def experiment_view(r: sqlite3.Row) -> dict:
+    """An experiment as the audit and the query interface show it."""
+    return {**{k: r[k] for k in r.keys() if k not in ("design", "candidates")}, "design": json.loads(r["design"]),
+            "candidates": json.loads(r["candidates"]) if r["candidates"] else {}}
 
 
 def load_partition(conn: sqlite3.Connection, workflow_id: str) -> Partition | None:
@@ -309,6 +332,13 @@ class Store:
                      "VALUES (?,?,?,?,?,?)",
                      (minute, workflow_id, kind, outcome, proposal_id, json.dumps(detail, sort_keys=True)))
 
+    def note_decision(self, minute: int, workflow_id: str, kind: str, outcome: str, detail: dict) -> None:
+        """A decision not to act, recorded when it changes: the latest row stays true until the next one."""
+        last = self.last_decision(workflow_id, kind)
+        if last is None or (last["outcome"], json.loads(last["detail"])) != (outcome, detail):
+            with self.transaction() as conn:
+                Store.record_decision(conn, minute, workflow_id, kind, outcome, None, detail)
+
     def proposal(self, proposal_id: str) -> sqlite3.Row:
         return self.conn.execute("SELECT * FROM proposals WHERE proposal_id = ?", (proposal_id,)).fetchone()
 
@@ -369,6 +399,51 @@ class Store:
             if event["actor"] == "supervisor" and dimension in event["changed_dims"]:
                 return minute_of(event["ts"], self.d0())
         return None
+
+    # -- experiments (written only here) ---------------------------------------------------------
+    @staticmethod
+    def next_experiment_seq(conn: sqlite3.Connection, workflow_id: str) -> int:
+        return conn.execute("SELECT COALESCE(MAX(seq), 0) + 1 FROM experiments WHERE workflow_id = ?",
+                            (workflow_id,)).fetchone()[0]
+
+    @staticmethod
+    def insert_experiment(conn: sqlite3.Connection, **row: Any) -> None:
+        conn.execute(f"INSERT INTO experiments ({', '.join(row)}) VALUES ({', '.join('?' * len(row))})",
+                     tuple(row.values()))
+
+    @staticmethod
+    def update_experiment(conn: sqlite3.Connection, experiment_id: str, **fields: Any) -> None:
+        conn.execute(f"UPDATE experiments SET {', '.join(f'{k} = ?' for k in fields)} WHERE experiment_id = ?",
+                     (*fields.values(), experiment_id))
+
+    def experiment(self, experiment_id: str) -> sqlite3.Row:
+        return self.conn.execute("SELECT * FROM experiments WHERE experiment_id = ?", (experiment_id,)).fetchone()
+
+    def latest_experiment(self, workflow_id: str) -> sqlite3.Row | None:
+        return self.conn.execute("SELECT * FROM experiments WHERE workflow_id = ? ORDER BY seq DESC LIMIT 1",
+                                 (workflow_id,)).fetchone()
+
+    def config_changes_after(self, workflow_id: str, version: int) -> list[dict]:
+        """The world's `config_changed` events for versions after this one, oldest first."""
+        events = (json.loads(r[0]) for r in self.conn.execute(
+            "SELECT payload FROM world_events WHERE workflow_id = ? AND type = 'config_changed' ORDER BY event_id", (workflow_id,)))
+        return [e for e in events if e["version"] > version]
+
+    def arm_counts(self, workflow_id: str, first_version: int, last_version: int | None = None,
+                   before_hour: int | None = None, excluded_cohorts: Collection[str] = ()) -> list[sqlite3.Row]:
+        """Per config version, welcome message and voice: connected calls and how many engaged.
+
+        `before_hour` leaves out the calls of that hour since D0 and later. `excluded_cohorts`: config branches
+        that dial from their own table, so their calls are not in the split.
+        """
+        return self.conn.execute(
+            "SELECT a.config_version config_version, v.welcome_message welcome_message, v.voice voice, "
+            "SUM(a.connected) connected, SUM(a.engaged) engaged "
+            "FROM cell_agg a JOIN variants v USING (variant_id) "
+            "WHERE a.workflow_id = ?1 AND a.config_version >= ?2 AND (?3 IS NULL OR a.config_version <= ?3) "
+            "AND (?4 IS NULL OR a.day * 24 + a.hour < ?4) AND a.cohort_id NOT IN (SELECT value FROM json_each(?5)) "
+            "GROUP BY a.config_version, v.welcome_message, v.voice",
+            (workflow_id, first_version, last_version, before_hour, json.dumps(list(excluded_cohorts)))).fetchall()
 
     def active_leads_by_cell(self, workflow_id: str, first_active_day: int) -> list[sqlite3.Row]:
         """Per feature cell, the leads of campaigns created since that day."""
