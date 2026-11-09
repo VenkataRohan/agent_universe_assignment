@@ -76,4 +76,4 @@
 }
 ```
 
-Credits used: 0 · validation runs: 0 · LLM fix calls: 0
+Credits used: 3 · validation runs: 1 · LLM fix calls: 0

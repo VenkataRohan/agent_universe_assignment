@@ -1,31 +1,31 @@
 {
   "mode": "run.sh",
   "exit_code": 0,
-  "wall_s": 535.4,
+  "wall_s": 537.3,
   "days": [
     {
       "day": 0,
-      "wall_s": 139.3
+      "wall_s": 135.4
     },
     {
       "day": 1,
-      "wall_s": 85.6
+      "wall_s": 86.3
     },
     {
       "day": 2,
-      "wall_s": 105.7
+      "wall_s": 107.3
     },
     {
       "day": 3,
-      "wall_s": 99.1
+      "wall_s": 98.9
     },
     {
       "day": 4,
-      "wall_s": 105.7
+      "wall_s": 109.4
     }
   ],
-  "controller_peak_rss_mb": 221,
-  "simulator_peak_rss_mb": 830,
+  "controller_peak_rss_mb": 201,
+  "simulator_peak_rss_mb": 640,
   "scenario": "public_03_load.yaml",
   "host": {
     "cpus": 10,
