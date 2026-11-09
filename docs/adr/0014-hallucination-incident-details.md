@@ -15,7 +15,7 @@ The spec gives the detector's thresholds and the shape of the response. It leave
 
 ## Consequences
 
-- A workflow that can't reach 150 connects in 2 hours can never raise an incident: on public_02, `nw_kyc` runs about 55 connects an hour.
+- A workflow that can't reach 150 connects in 24 hours can never raise an incident. The window grows to reach them (ADR-0016).
 - At α 0.001, tested every tick on every workflow, a healthy workflow will sometimes raise a false incident. It costs one validation run and an escalation.
 - A real spike on a prompt that still passes validation is left to a person, because validation is a noisy measure of safety.
 - A crash after a validation or an LLM suggestion returns, but before it is committed, pays for that one call again. Neither endpoint takes an idempotency key, so the "all mutating calls" rule can't cover them.

@@ -23,6 +23,7 @@ from .store import Store
 
 KIND = "hallucination"
 WINDOW_MINUTES = 120
+DETECTION_LOOKBACK_MINUTES = MINUTES_PER_DAY  # how far a quiet workflow's window may grow to reach its minimum connects (ADR-0016)
 ONSET_LOOKBACK_MINUTES = MINUTES_PER_DAY
 PROMPT_CHANGE_LOOKBACK_MINUTES = MINUTES_PER_DAY
 VALIDATION_RUN_SIZE = 300
@@ -48,15 +49,15 @@ def _detect(store: Store, sim: SimClient, workflow: Mapping, now: int) -> sqlite
     """One prompt at a time: calls on a prompt that has already gone can't be the live prompt's fault."""
     wf = workflow["workflow_id"]
     baseline = store.baseline_flag_rate(wf)
-    windows = _windows(store.flag_ticks(wf, now - WINDOW_MINUTES, now))
-    tested = {p: c for p, c in windows.items() if c.trials >= stats.HALLUCINATION_MIN_CONNECTS}
+    windows = _detection_windows(store.flag_ticks(wf, now - DETECTION_LOOKBACK_MINUTES, now), now)
+    tested = {p: c for p, (c, _) in windows.items() if c.trials >= stats.HALLUCINATION_MIN_CONNECTS}
     if not tested:
         store.note_decision(now, wf, KIND, "too_few_connects", {})
         return None
     verdicts = {p: stats.hallucination_spike(c, baseline) for p, c in tested.items()}
-    evidence = {"window_minutes": WINDOW_MINUTES, "baseline_flag_rate": baseline,
+    evidence = {"baseline_flag_rate": baseline,
                 "prompts": {p: {"connects": c.trials, "flags": c.successes, "p_value": verdicts[p].p_value,
-                                "spike": verdicts[p].holds} for p, c in sorted(tested.items())}}
+                                "spike": verdicts[p].holds, "window_minutes": windows[p][1]} for p, c in sorted(tested.items())}}
     if not any(v.holds for v in verdicts.values()):
         _decided(store, now, wf, "below_threshold", evidence)
         return None
@@ -71,6 +72,23 @@ def _detect(store: Store, sim: SimClient, workflow: Mapping, now: int) -> sqlite
         store.note_decision(now, wf, KIND, "recently_cleared", {"prompt": live})
         return None
     return _raise(store, workflow, live, evidence, baseline, now)
+
+
+def _detection_windows(rows: list[sqlite3.Row], now: int) -> dict[str, tuple[stats.Counts, int]]:
+    """Per prompt, its counts and window: the last 2 hours, grown back tick by tick until it has the minimum connects.
+
+    The window's length depends only on connects, never on flags, so the binomial test stays valid at any length.
+    `rows`: oldest first.
+    """
+    taken: dict[str, list[int]] = {}  # prompt -> flags, connects, the oldest minute counted
+    for r in reversed(rows):
+        t = taken.setdefault(r["prompt_version"], [0, 0, now - WINDOW_MINUTES])
+        if r["minute"] < now - WINDOW_MINUTES and t[1] >= stats.HALLUCINATION_MIN_CONNECTS:
+            continue
+        t[0] += r["flags"]
+        t[1] += r["connects"]
+        t[2] = min(t[2], r["minute"])
+    return {p: (stats.Counts(flags, connects), now - oldest) for p, (flags, connects, oldest) in taken.items()}
 
 
 def _windows(rows: list[sqlite3.Row]) -> dict[str, stats.Counts]:
@@ -183,8 +201,9 @@ def _validate_all(store: Store, credits: Credits, wf: str, incident_id: str, can
 def _ask_llm(store: Store, credits: Credits, workflow: Mapping, incident: sqlite3.Row, candidates: list[dict], now: int) -> list[dict]:
     wf, incident_id = workflow["workflow_id"], incident["incident_id"]
     detection = json.loads(incident["detection"])["prompts"][incident["bad_prompt"]]
+    hours = detection["window_minutes"] / 60
     problem = (f"Prompt {incident['bad_prompt']} is hallucinating: {detection['flags']} of {detection['connects']} connected "
-               f"calls flagged in the last {WINDOW_MINUTES // 60} hours.")
+               f"calls flagged in the last {hours:g} hours.")
     suggestions = credits.suggest_fixes(wf, problem, incident=True)["suggestions"]
     tried = {c["prompt"] for c in candidates}
     usable = set(workflow["options"]["prompt_version"]) - store.ruled_out_prompts(wf) - tried
@@ -254,7 +273,7 @@ def _draft(store: Store, workflow: Mapping, incident: sqlite3.Row, composed: Com
     else:
         summary = f"Change the prompt from {incident['bad_prompt']} to {chosen['prompt']}: {observed}. {validated}."
     rationale = (f"The flag rate on {incident['bad_prompt']} is at least {stats.HALLUCINATION_MIN_RATIO}x the workflow's baseline over "
-                 f"{WINDOW_MINUTES // 60} hours and {seen['connects']} connects (one-sided binomial p = {seen['p_value']:.2g}), from "
+                 f"{seen['window_minutes'] / 60:g} hours and {seen['connects']} connects (one-sided binomial p = {seen['p_value']:.2g}), from "
                  f"about {label(incident['onset_minute'])}.")
     if overlay_hold is not None:
         why = f" Sent under the policy's own limits instead of the client's preference ({overlay_hold}), because customer harm outranks it."

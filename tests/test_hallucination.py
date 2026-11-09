@@ -53,6 +53,38 @@ def test_a_hallucinating_prompt_is_replaced_by_a_validated_fix_and_the_fix_is_ve
     assert incident["minutes_onset_to_applied"] == fix["applied_minute"] - incident["onset_minute"]
 
 
+def test_a_workflow_too_quiet_for_150_connects_in_2_hours_still_raises_an_incident(world, db_path):
+    _, troubled, _ = hallucinating_world(world, {"P1": 0.25}, workflow="nw_kyc")
+
+    Controller(troubled, db_path).run()
+
+    [first, *_] = queries.incidents(db_path, "nw_kyc")
+    assert first["bad_prompt"] == "P1"
+    seen = first["detection"]["prompts"]["P1"]
+    assert seen["connects"] >= 150 and 120 < seen["window_minutes"] <= 24 * 60
+
+
+def test_a_quiet_workflow_without_a_spike_raises_no_incident(world, db_path):
+    client = world(days=3, history_days=2)
+    troubled, _ = troubled_client(client, approval_only=True)
+
+    Controller(troubled, db_path).run()
+
+    assert queries.incidents(db_path, "nw_kyc") == []
+
+
+def test_a_busy_workflow_with_150_connects_in_2_hours_is_judged_on_those_2_hours(world, db_path):
+    client = world(days=1, history_days=2)
+    troubled, _ = troubled_client(client, approval_only=True)
+    Controller(troubled, db_path).run()
+
+    afternoon = [d for d in queries.decisions(db_path, WF, "hallucination")
+                 if d["outcome"] == "below_threshold" and 14 * 60 <= d["minute"] <= 16 * 60]
+
+    assert afternoon and all(d["detail"]["prompts"]["P1"]["connects"] >= 150 and d["detail"]["prompts"]["P1"]["window_minutes"] == 120
+                             for d in afternoon)
+
+
 def test_the_audit_shows_how_long_the_fix_took_from_onset(world, db_path, capsys):
     _, troubled, _ = hallucinating_world(world, {"P1": 0.25})
     Controller(troubled, db_path).run()
@@ -62,7 +94,7 @@ def test_the_audit_shows_how_long_the_fix_took_from_onset(world, db_path, capsys
 
     assert answer["incident"]["incident_id"] == incident["incident_id"]
     assert answer["incident"]["minutes_onset_to_applied"] == incident["applied_minute"] - incident["onset_minute"]
-    assert cli_main(["why", WF, "--at", "D2 23:45", "--db", str(db_path)]) == 0
+    assert cli_main(["why", WF, "--at", simtime.label(incident["applied_minute"]), "--db", str(db_path)]) == 0
     assert f"{incident['minutes_onset_to_applied']} minutes after onset" in capsys.readouterr().out
 
 
