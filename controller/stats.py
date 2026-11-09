@@ -14,7 +14,7 @@ CONFIRM_POWER = 0.80
 CONFIRM_MAX_LOOKS = 3
 CONFIRM_MAX_DAYS = 7  # how long a confirm may wait for half its planned sample before it ends undecided (ADR-0011)
 GUARDRAIL_ALPHA = 0.05
-HARM_ALPHA = 0.10  # per cohort, deliberately uncorrected: a harm check should err towards blocking
+HARM_ALPHA = 0.10  # the chance a candidate with no real effect blocks on any cohort, at one look (Holm, ADR-0016)
 DECAY_ALPHA = 0.05
 SCHEDULE_ROLLBACK_ALPHA = 0.05
 SCREEN_ELIMINATION_ALPHA = 0.05
@@ -153,18 +153,24 @@ def guardrail_non_inferior_strata(pairs: Sequence[tuple[Counts, Counts]], max_dr
 
 
 def cohort_harm(arms: Mapping[str, tuple[Counts, Counts]]) -> dict[str, Verdict]:
-    """For each cohort's (candidate, control) counts: is the candidate significantly worse there?"""
-    return {cohort: _one_sided(control, candidate, HARM_ALPHA)
-            for cohort, (candidate, control) in sorted(arms.items())}
+    """For each cohort's (candidate, control) counts: is the candidate significantly worse there, across all of them?"""
+    return _holm({cohort: _p_greater(control, candidate) for cohort, (candidate, control) in arms.items()}, HARM_ALPHA)
 
 
 def cohort_harm_strata(arms: Mapping[str, Sequence[tuple[Counts, Counts]]]) -> dict[str, Verdict]:
     """`cohort_harm` where each cohort has (candidate, control) strata."""
-    out = {}
-    for cohort, pairs in sorted(arms.items()):
-        p = _p_greater_strata([(control, candidate) for candidate, control in pairs])
-        out[cohort] = Verdict(p < HARM_ALPHA, p)
-    return out
+    return _holm({cohort: _p_greater_strata([(control, candidate) for candidate, control in pairs])
+                  for cohort, pairs in arms.items()}, HARM_ALPHA)
+
+
+def _holm(p_values: Mapping[str, float], alpha: float) -> dict[str, Verdict]:
+    """Holm's step-down over a family: holds family-wise alpha, and every verdict keeps its raw p-value for the audit."""
+    verdicts: dict[str, Verdict] = {}
+    rejecting = True
+    for i, name in enumerate(sorted(p_values, key=lambda n: (p_values[n], n))):
+        rejecting = rejecting and p_values[name] < alpha / (len(p_values) - i)
+        verdicts[name] = Verdict(rejecting, p_values[name])
+    return dict(sorted(verdicts.items()))
 
 
 def decayed(winner: Counts, holdback: Counts) -> Verdict:

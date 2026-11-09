@@ -94,14 +94,41 @@ def test_guardrail_with_no_data_fails(candidate, control):
     assert not stats.guardrail_non_inferior(candidate, control, max_drop=0.02).passed
 
 
-def test_a_cohort_is_harmed_only_past_the_harm_threshold():
+def test_a_lone_cohort_is_harmed_only_past_the_harm_threshold():
     # Critical z at 0.10 is 1.2816. Against 500/1000 for the candidate: control 530 gives z = 1.342, 528 gives 1.253.
-    verdicts = stats.cohort_harm({
-        "senior": (stats.Counts(500, 1000), stats.Counts(530, 1000)),
-        "young": (stats.Counts(500, 1000), stats.Counts(528, 1000)),
-    })
-    assert verdicts["senior"].holds
-    assert not verdicts["young"].holds
+    assert stats.cohort_harm({"senior": (stats.Counts(500, 1000), stats.Counts(530, 1000))})["senior"].holds
+    assert not stats.cohort_harm({"young": (stats.Counts(500, 1000), stats.Counts(528, 1000))})["young"].holds
+
+
+def test_a_borderline_cohort_is_not_harmed_once_four_cohorts_share_the_threshold():
+    # 530 against 500 of 1000 has p = 0.09: harm on its own, but the smallest of 4 p-values must clear 0.10 / 4.
+    level = (stats.Counts(500, 1000), stats.Counts(500, 1000))
+    arms = {"a": (stats.Counts(500, 1000), stats.Counts(530, 1000)), "b": level, "c": level, "d": level}
+    assert not any(v.holds for v in stats.cohort_harm(arms).values())
+
+
+def test_clear_harm_in_one_of_four_cohorts_still_blocks_and_only_that_cohort_is_named():
+    # 570 against 500 of 1000: z = 3.15, far past 0.10 / 4.
+    level = (stats.Counts(500, 1000), stats.Counts(500, 1000))
+    verdicts = stats.cohort_harm({"a": (stats.Counts(500, 1000), stats.Counts(570, 1000)), "b": level, "c": level, "d": level})
+    assert verdicts["a"].holds and not any(verdicts[c].holds for c in "bcd")
+
+
+def test_the_harm_correction_steps_down_after_each_cohort_it_finds():
+    # p about 0.02 and 0.03, with 2 others level: 0.02 < 0.10/4 and then 0.03 < 0.10/3.
+    level = (stats.Counts(500, 1000), stats.Counts(500, 1000))
+    verdicts = stats.cohort_harm({"a": (stats.Counts(500, 1000), stats.Counts(546, 1000)),
+                                  "b": (stats.Counts(500, 1000), stats.Counts(542, 1000)), "c": level, "d": level})
+    assert 0.025 > verdicts["a"].p_value and 0.025 < verdicts["b"].p_value < 0.1 / 3
+    assert verdicts["a"].holds and verdicts["b"].holds
+
+
+def test_the_harm_correction_stops_at_the_first_cohort_it_cannot_reject():
+    # The second smallest p of 0.09 fails 0.10/3, so the larger one can't be named even though it is below 0.10.
+    level = (stats.Counts(500, 1000), stats.Counts(500, 1000))
+    verdicts = stats.cohort_harm({"a": (stats.Counts(500, 1000), stats.Counts(570, 1000)),
+                                  "b": (stats.Counts(500, 1000), stats.Counts(530, 1000)), "c": level, "d": level})
+    assert verdicts["a"].holds and not verdicts["b"].holds
 
 
 def test_a_winner_has_decayed_only_when_significantly_worse_than_its_holdback():
@@ -263,6 +290,15 @@ def test_cohort_harm_false_positive_rate():
     candidates, controls = _arm(rng, n, 0.544, runs), _arm(rng, n, 0.544, runs)
     harmed = sum(stats.cohort_harm({"c": (a, b)})["c"].holds for a, b in zip(candidates, controls))
     assert _within_alpha(harmed, runs, 0.10)
+
+
+def test_any_cohort_harm_false_alarm_rate_across_four_cohorts_stays_at_ten_percent():
+    rng, runs, n = np.random.default_rng(14), 20_000, 300
+    arms = [(_arm(rng, n, 0.544, runs), _arm(rng, n, 0.544, runs)) for _ in range(4)]
+    alarms = sum(
+        any(v.holds for v in stats.cohort_harm({str(c): (arms[c][0][r], arms[c][1][r]) for c in range(4)}).values())
+        for r in range(runs))
+    assert _within_alpha(alarms, runs, 0.10)
 
 
 def test_decay_false_positive_rate_on_the_80_20_split():

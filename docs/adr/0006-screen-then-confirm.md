@@ -4,4 +4,4 @@ An experiment first **screens** every challenger (factorial split, control 50%) 
 
 ## Consequences
 
-- Cohort-specific winners are not promoted: a 15% cohort can't be confirmed within a scenario. Instead, a promotion is blocked if any cohort of the workflow's analysis partition shows significant harm (one-sided α 0.10, uncorrected).
+- Cohort-specific winners are not promoted: a 15% cohort can't be confirmed within a scenario. Instead, a promotion is blocked if any cohort of the workflow's analysis partition shows significant harm (one-sided, family-wise α 0.10 across cohorts by Holm's method, ADR-0016).
