@@ -1,6 +1,6 @@
 # Outcome-First Agent Loop — Submission
 
-**Name:** Venkata Rohan Kambhampati · **Date:** 2026-11-09 · **Hours actually spent (be honest):** _to be filled in by the author_ · **Language / storage:** Python 3 / one SQLite file (WAL mode)
+**Name:** Venkata Rohan Kambhampati · **Date:** 2026-11-09 · **Hours actually spent (be honest):** 18 · **Language / storage:** Python 3 / one SQLite file (WAL mode)
 
 ---
 
